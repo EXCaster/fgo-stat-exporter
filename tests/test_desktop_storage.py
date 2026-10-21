@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from fgo_local_exporter.desktop_storage import (
-    choose_startup_directory,
-    create_browser_directory,
+    browser_session_directory,
+    read_startup_directory,
     validate_data_directory,
 )
 from fgo_local_exporter.errors import ExportError
@@ -25,75 +25,37 @@ class MemorySettings:
         self.directory = directory
 
 
-def test_first_start_uses_selected_directory_without_creating_appdata(tmp_path, monkeypatch):
+def test_first_start_has_no_directory_and_does_not_create_appdata(tmp_path, monkeypatch):
     appdata = tmp_path / "AppData"
     monkeypatch.setenv("LOCALAPPDATA", str(appdata))
-    selected = tmp_path / "自选数据目录"
     settings = MemorySettings()
-    prompts = []
-
-    def choose(previous, message):
-        prompts.append((previous, message))
-        return selected
-
-    assert choose_startup_directory(settings=settings, chooser=choose) == selected
-    assert prompts == [(None, "")]
-    assert settings.saved == [selected]
-    assert selected.is_dir() and list(selected.iterdir()) == []
+    assert read_startup_directory(settings=settings) is None
+    assert settings.saved == []
     assert not appdata.exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_second_start_reuses_selection_without_prompting(tmp_path):
     selected = tmp_path / "data"
     settings = MemorySettings(selected)
 
-    def unexpected(*_args):
-        pytest.fail("已选目录可用时不应再次弹窗")
-
-    assert choose_startup_directory(settings=settings, chooser=unexpected) == selected
+    assert read_startup_directory(settings=settings) == selected
     assert settings.saved == []
 
 
-def test_cancel_first_start_does_not_create_data_directory(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
-    settings = MemorySettings()
-    assert choose_startup_directory(settings=settings, chooser=lambda *_args: None) is None
-    assert settings.saved == []
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_unavailable_saved_directory_prompts_and_retains_existing_file(tmp_path):
+def test_unavailable_saved_directory_returns_to_page_and_retains_existing_file(tmp_path):
     occupied = tmp_path / "occupied"
     occupied.write_text("existing file")
-    selected = tmp_path / "replacement"
-    prompts = []
-
-    def choose(previous, message):
-        prompts.append((previous, message))
-        return selected
-
-    assert choose_startup_directory(settings=MemorySettings(occupied), chooser=choose) == selected
-    assert prompts[0][0] == occupied and "不可用" in prompts[0][1]
-    assert occupied.read_text() == "existing file"
-
-
-def test_invalid_choice_can_be_cancelled_without_replacing_setting(tmp_path):
-    settings = MemorySettings()
-    prompts = []
-
-    def choose(previous, message):
-        prompts.append((previous, message))
-        return Path("relative") if len(prompts) == 1 else None
-
-    assert choose_startup_directory(settings=settings, chooser=choose) is None
-    assert "无法写入" in prompts[1][1]
+    settings = MemorySettings(occupied)
+    assert read_startup_directory(settings=settings) is None
     assert settings.saved == []
+    assert occupied.read_text() == "existing file"
 
 
 def test_explicit_directory_does_not_overwrite_remembered_selection(tmp_path):
     settings = MemorySettings(tmp_path / "remembered")
     selected = tmp_path / "override"
-    assert choose_startup_directory(selected, settings=settings) == selected
+    assert read_startup_directory(selected, settings=settings) == selected
     assert settings.directory == tmp_path / "remembered" and settings.saved == []
 
 
@@ -122,31 +84,30 @@ def test_write_failure_leaves_user_files_untouched(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == [original]
 
 
-def test_failed_settings_write_allows_cancel_without_falling_back_to_appdata(tmp_path):
-    class FailedSettings(MemorySettings):
-        def save(self, directory):
-            raise ExportError("DATA_SETTINGS_UNAVAILABLE")
-
-    prompts = []
-
-    def choose(previous, message):
-        prompts.append((previous, message))
-        return tmp_path / "chosen" if len(prompts) == 1 else None
-
-    assert choose_startup_directory(settings=FailedSettings(), chooser=choose) is None
-    assert "无法记住" in prompts[1][1]
-
-
 def test_browser_uses_unique_directories_and_preserves_existing_files(tmp_path):
     browser = tmp_path / "webview"
     browser.mkdir()
     existing = browser / "keep.txt"
     existing.write_text("existing file")
-    first = create_browser_directory(tmp_path)
-    second = create_browser_directory(tmp_path)
-    assert first.parent == second.parent == browser
-    assert first != second and first.is_dir() and second.is_dir()
+    with (
+        browser_session_directory(tmp_path) as first,
+        browser_session_directory(tmp_path) as second,
+    ):
+        assert first.parent == second.parent == browser
+        assert first != second and first.is_dir() and second.is_dir()
+    assert not first.exists() and not second.exists()
     assert existing.read_text() == "existing file"
+
+
+def test_unconfigured_browser_is_temporary_and_cleans_up_on_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("fgo_local_exporter.desktop_storage.tempfile.tempdir", str(tmp_path))
+    with pytest.raises(RuntimeError, match="synthetic failure"):
+        with browser_session_directory() as path:
+            assert path.parent == tmp_path and path.is_dir()
+            (path / "runtime-cache").write_bytes(b"synthetic")
+            raise RuntimeError("synthetic failure")
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("name", ["resources", "webview"])

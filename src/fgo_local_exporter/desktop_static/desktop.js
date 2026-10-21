@@ -9,27 +9,31 @@
     EXPORT_PATH_EXISTS:"所选文件已经存在，请换一个文件名保存。",
     EXPORT_EXTENSION_INVALID:"请保留文件的 JSON 或 JPG 扩展名。",
     LOCAL_OPERATION_FAILED:"操作未完成，请重试。",
+    DATA_DIRECTORY_REQUIRED:"请先点击“选择数据目录”，设置字典和图片缓存的保存位置。",
+    DATA_DIRECTORY_BUSY:"正在选择目录或准备资源，请稍候。",
     DATA_DIRECTORY_UNAVAILABLE:"所选目录无法写入，请选择固定磁盘上的其他文件夹。",
     DATA_SETTINGS_UNAVAILABLE:"无法记住数据目录，请检查 Windows 用户权限后重试。"
   };
-  let connected = false, updating = false;
+  let connected = false, updating = false, selectingDirectory = false;
   const storageRow = document.createElement("div");
   storageRow.className = "desktop-directory";
-  storageRow.innerHTML = '<label for="desktop-data-directory">数据保存位置</label><input id="desktop-data-directory" readonly aria-label="数据保存位置"><button id="desktop-change-data" class="button light" type="button">更换数据目录</button>';
-  $("desktop-dictionary-directory").closest(".desktop-directory").insertAdjacentElement("beforebegin", storageRow);
+  storageRow.innerHTML = '<label for="desktop-data-directory">数据保存位置</label><input id="desktop-data-directory" readonly aria-label="数据保存位置" placeholder="尚未选择数据目录"><button id="desktop-change-data" class="button primary" type="button" disabled>选择数据目录</button>';
+  document.querySelector(".desktop-status-title").insertAdjacentElement("afterend", storageRow);
   const storageHint = document.createElement("p");
   storageHint.className = "desktop-secondary";
   storageHint.id = "desktop-storage-hint";
   storageRow.insertAdjacentElement("afterend", storageHint);
   $("desktop-change-data").addEventListener("click", async () => {
     const button = $("desktop-change-data");
+    selectingDirectory = true;
     button.disabled = true;
     try {
       const result = await command("choose_data_directory");
-      if (result.changed) notice(result.restart_required ? "数据目录已设置，重启应用后生效。原目录的文件会保留。" : "已继续使用当前数据目录。");
+      if (result.changed) notice(result.restart_required ? "数据目录已设置，重启应用后生效。原目录的文件会保留。" : result.first_selection ? "数据目录已设置，资源准备和更新进度会显示在下方。" : "已继续使用当前数据目录。");
+      else notice("已取消选择，当前设置未改变。可以随时重新选择目录。");
       await refresh();
     } catch (error) { notice(error.message); }
-    finally { button.disabled = false; }
+    finally { selectingDirectory = false; button.disabled = false; }
   });
   const openData = document.createElement("button");
   openData.id = "desktop-open-data";
@@ -65,9 +69,27 @@
     updating = true;
     try {
       const value = await command("status");
-      window.renderResourceStatus(value.resources, value.dictionary_directory);
+      const configured = !!value.data_directory;
+      let busy = false;
+      if (configured) busy = window.renderResourceStatus(value.resources, value.dictionary_directory);
+      else {
+        $("desktop-resource-state").textContent = "未选择目录";
+        $("desktop-resource-state").dataset.state = "waiting";
+        $("desktop-resources").textContent = "先选择数据目录，再准备字典和图片缓存。";
+        $("desktop-dictionary-meta").textContent = "字典：尚未准备";
+        $("desktop-images-meta").textContent = "图片：尚未准备";
+        $("desktop-dictionary-directory").value = "选择数据目录后显示字典位置";
+        $("desktop-open-dictionary").disabled = true;
+        $("desktop-progress-area").hidden = true;
+      }
+      const choosing = selectingDirectory || value.selecting_data_directory;
+      $("desktop-change-data").disabled = choosing;
+      $("desktop-change-data").textContent = configured ? "更换数据目录" : "选择数据目录";
+      $("desktop-change-data").className = configured ? "button light" : "button primary";
+      $("desktop-prepare").disabled = $("desktop-existing").disabled = !configured || busy || choosing;
+      $("desktop-open-data").disabled = !configured;
       $("desktop-data-directory").value = value.data_directory;
-      storageHint.textContent = value.pending_data_directory ? `重启后使用：${value.pending_data_directory}。原目录的文件会保留。` : "字典、图片缓存和浏览器数据保存在此目录。";
+      storageHint.textContent = !configured ? "请手动选择字典和图片缓存的保存位置。选择后即可继续使用，无需重启。" : value.pending_data_directory ? `重启后使用：${value.pending_data_directory}。原目录的文件会保留。` : "字典和图片缓存保存在此目录；下次启动也会沿用。";
       $("desktop-open-folder").hidden = !value.can_open_folder;
     } catch (error) { notice(error.message); }
     finally { updating = false; }
@@ -97,9 +119,8 @@
   async function ready() {
     try {
       const csrf = document.querySelector('meta[name="fgo-csrf"]').content;
-      const initial = failed(await window.pywebview.api.connect(csrf));
+      failed(await window.pywebview.api.connect(csrf));
       connected = true;
-      if (!initial.resources.ready) await command("prepare_resources");
       await refresh();
       window.setInterval(refresh, 400);
     } catch (error) { notice(error.message); }

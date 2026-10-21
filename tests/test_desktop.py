@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import sys
+import threading
 import time
 
 import pytest
@@ -10,6 +12,7 @@ from fgo_local_exporter.desktop import create_desktop_app
 from fgo_local_exporter.desktop_bridge import DesktopBridge
 from fgo_local_exporter.desktop_profile import load_cached_profile, save_cached_profile
 from fgo_local_exporter.desktop_resources import ResourceManager
+from fgo_local_exporter.desktop_storage import read_startup_directory
 from fgo_local_exporter.errors import ExportError
 from fgo_local_exporter.game_profile import GameProfile
 from fgo_local_exporter.settings import LocalConfig
@@ -64,8 +67,8 @@ def test_corrupted_protocol_cache_fails_without_echoing_data(tmp_path):
     assert "not-an-encrypted" not in str(error.value)
 
 
-def make_app(tmp_path):
-    resources = ResourceManager(tmp_path / "resources")
+def make_app(tmp_path, *, configured=True):
+    resources = ResourceManager(tmp_path / "resources") if configured else None
     config = LocalConfig(origin="http://127.0.0.1:55313")
     bridge = DesktopBridge(config, resources)
     bridge._profile_path = tmp_path / "game-protocol.json"
@@ -183,6 +186,144 @@ def test_changing_data_directory_waits_for_restart_and_preserves_current_files(t
         assert bridge.status()["pending_data_directory"] == ""
     finally:
         app.extensions["local_store"].close()
+
+
+def test_unconfigured_page_waits_for_selection_and_cancel_keeps_it_open(tmp_path, monkeypatch):
+    appdata = tmp_path / "AppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(appdata))
+    app, client, bridge, page, csrf = make_app(tmp_path, configured=False)
+    bridge._storage = MemorySettings()
+
+    class Window:
+        def create_file_dialog(self, *_args, **_kwargs):
+            return None
+
+    bridge._window = Window()
+    try:
+        assert bridge.connect(csrf)["data_directory"] == ""
+        assert bridge.status()["resources"] == {"phase": "waiting", "ready": False}
+        for action in (bridge.prepare_resources, bridge.choose_resources, bridge.open_data_folder):
+            assert action()["error"] == "DATA_DIRECTORY_REQUIRED"
+        assert bridge.choose_data_directory() == {"ok": True, "changed": False}
+        assert bridge._resources is None and bridge._storage.saved == []
+        assert client.get("/").status_code == 200
+        assert not appdata.exists() and list(tmp_path.iterdir()) == []
+    finally:
+        app.extensions["local_store"].close()
+
+
+def test_first_manual_selection_prepares_chosen_directory_without_restart(tmp_path, monkeypatch):
+    app, client, bridge, page, csrf = make_app(tmp_path, configured=False)
+    selected = tmp_path / "自选数据目录"
+    bridge._storage = MemorySettings()
+    prepared = []
+    monkeypatch.setattr(
+        ResourceManager, "prepare", lambda manager, callback: prepared.append(manager.root)
+    )
+
+    class Window:
+        def create_file_dialog(self, *_args, **_kwargs):
+            return (str(selected),)
+
+    bridge._window = Window()
+    try:
+        bridge.connect(csrf)
+        assert prepared == []
+        result = bridge.choose_data_directory()
+        assert result == {
+            "ok": True, "changed": True, "restart_required": False, "first_selection": True
+        }
+        assert prepared == [selected / "resources"]
+        assert bridge._storage.saved == [selected]
+        assert bridge.status()["data_directory"] == str(selected)
+        assert bridge.status()["pending_data_directory"] == ""
+        assert read_startup_directory(settings=bridge._storage) == selected
+        assert not bridge.status()["selecting_data_directory"]
+    finally:
+        app.extensions["local_store"].close()
+
+
+def test_failed_manual_settings_write_keeps_page_unconfigured(tmp_path):
+    app, client, bridge, page, csrf = make_app(tmp_path, configured=False)
+
+    class FailedSettings(MemorySettings):
+        def save(self, directory):
+            raise ExportError("DATA_SETTINGS_UNAVAILABLE")
+
+    class Window:
+        def create_file_dialog(self, *_args, **_kwargs):
+            return (str(tmp_path / "chosen"),)
+
+    bridge._storage, bridge._window = FailedSettings(), Window()
+    try:
+        assert bridge.choose_data_directory()["error"] == "DATA_SETTINGS_UNAVAILABLE"
+        assert bridge.status()["data_directory"] == "" and bridge._resources is None
+        assert not (tmp_path / "chosen/resources").exists()
+        assert client.get("/").status_code == 200
+    finally:
+        app.extensions["local_store"].close()
+
+
+def test_duplicate_manual_selection_does_not_open_another_dialog(tmp_path):
+    app, client, bridge, page, csrf = make_app(tmp_path, configured=False)
+    opened, release = threading.Event(), threading.Event()
+
+    class Window:
+        def create_file_dialog(self, *_args, **_kwargs):
+            opened.set()
+            assert release.wait(3)
+            return None
+
+    bridge._window = Window()
+    worker = threading.Thread(target=bridge.choose_data_directory)
+    try:
+        worker.start()
+        assert opened.wait(3)
+        assert bridge.status()["selecting_data_directory"]
+        assert bridge.choose_data_directory()["error"] == "DATA_DIRECTORY_BUSY"
+    finally:
+        release.set()
+        worker.join(3)
+        assert not worker.is_alive()
+        app.extensions["local_store"].close()
+
+
+def test_first_start_opens_window_without_selecting_or_preparing_resources(tmp_path, monkeypatch):
+    import webview
+
+    from fgo_local_exporter.desktop import main
+
+    monkeypatch.setattr(sys, "argv", ["FGOStatDesktop.exe"])
+    monkeypatch.setattr("fgo_local_exporter.desktop.StorageSettings", MemorySettings)
+    monkeypatch.setattr(
+        "fgo_local_exporter.desktop_bridge.default_profile_path",
+        lambda: tmp_path / "game-protocol.json",
+    )
+    monkeypatch.setattr("fgo_local_exporter.desktop_storage.tempfile.tempdir", str(tmp_path))
+    calls, browser_paths = [], []
+
+    def create_window(title, url, *, js_api, **_kwargs):
+        calls.append("page")
+        assert js_api._resources is None
+        return object()
+
+    def start(**kwargs):
+        from pathlib import Path
+
+        calls.append("browser")
+        path = Path(kwargs["storage_path"])
+        assert path.is_dir()
+        browser_paths.append(path)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("首次进入页面前不能准备或下载资源")
+
+    monkeypatch.setattr(webview, "create_window", create_window)
+    monkeypatch.setattr(webview, "start", start)
+    monkeypatch.setattr(ResourceManager, "__init__", unexpected)
+    main()
+    assert calls == ["page", "browser"]
+    assert len(browser_paths) == 1 and not browser_paths[0].exists()
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from PIL import Image
 
 from fgo_local_exporter import __version__
 from fgo_local_exporter.desktop_reports import DesktopReportBuilder
+from fgo_local_exporter.desktop_resources import ResourceManager
 from fgo_local_exporter.desktop_storage import StorageSettings, validate_data_directory
 from fgo_local_exporter.errors import ExportError
 from fgo_local_exporter.game_profile import default_profile_path, load_profile
@@ -48,9 +49,44 @@ class DesktopBridge:
             Path(profile_path) if profile_path is not None else default_profile_path()
         )
         self._asset_root = None
-        self._data_root = Path(data_root) if data_root is not None else resources.root.parent
+        self._data_root = (
+            Path(data_root)
+            if data_root is not None
+            else resources.root.parent if resources is not None else None
+        )
         self._pending_data_root = None
         self._storage = storage or StorageSettings()
+        self._selecting_directory = self._initializing_resources = False
+
+    def _initialize_resources(self):
+        """仅在已有数据目录时启用字典；复制和下载的进度由状态接口显示。"""
+        resources = self._resources
+        with self._lock:
+            self._initializing_resources = True
+        try:
+            active = resources.restore_active()
+            if active is not None:
+                self._attach_resources(active)
+            elif self._asset_root is not None:
+                self._attach_resources(resources.cache_existing(self._asset_root))
+            resources.prepare(self._attach_resources)
+        except Exception as error:
+            with resources.lock:
+                resources.phase = "error"
+                resources.error = (
+                    error.code if isinstance(error, ExportError) else "RESOURCE_PREPARE_FAILED"
+                )
+        finally:
+            with self._lock:
+                self._initializing_resources = False
+
+    def _require_resources(self):
+        with self._lock:
+            if self._resources is None:
+                raise ExportError("DATA_DIRECTORY_REQUIRED")
+            if self._initializing_resources:
+                raise ExportError("DATA_DIRECTORY_BUSY")
+            return self._resources
 
     def _restore_profile(self):
         try:
@@ -77,18 +113,25 @@ class DesktopBridge:
     @_safe
     def status(self):
         with self._lock:
+            resources = self._resources
+            resource_state = (
+                resources.state() if resources is not None else {"phase": "waiting", "ready": False}
+            )
+            if self._initializing_resources and resource_state["phase"] == "idle":
+                resource_state["phase"] = "checking"
             return {
                 "desktop_version": __version__,
                 "game_phase": self._game_phase,
                 "game_error": self._game_error,
                 "game_version": self._store.profile.version if self._store.profile else "",
-                "resources": self._resources.state(),
-                "dictionary_directory": str(self._resources.current / "data")
-                if self._resources.current is not None
+                "resources": resource_state,
+                "dictionary_directory": str(resources.current / "data")
+                if resources is not None and resources.current is not None
                 else "",
                 "native_support": bool(self._config.native_ui_dir),
                 "can_open_folder": self._last_folder is not None,
-                "data_directory": str(self._data_root),
+                "data_directory": str(self._data_root) if self._data_root is not None else "",
+                "selecting_data_directory": self._selecting_directory,
                 "pending_data_directory": str(self._pending_data_root)
                 if self._pending_data_root is not None
                 else "",
@@ -96,21 +139,22 @@ class DesktopBridge:
 
     @_safe
     def prepare_resources(self):
-        self._resources.prepare(self._attach_resources)
+        self._require_resources().prepare(self._attach_resources)
 
     @_safe
     def choose_resources(self):
         import webview
 
+        resources = self._require_resources()
         paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
         if paths:
-            root = self._resources.use_existing(paths[0])
+            root = resources.use_existing(paths[0])
             self._asset_root = root
             self._attach_resources(root)
 
     @_safe
     def open_dictionary_folder(self):
-        root = self._resources.current
+        root = self._require_resources().current
         if root is None:
             raise ExportError("RESOURCE_NOT_READY")
         path = local_directory_path(root / "data")
@@ -122,17 +166,37 @@ class DesktopBridge:
     def choose_data_directory(self):
         import webview
 
-        paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
-        if not paths:
-            return {"changed": False}
-        path = validate_data_directory(paths if isinstance(paths, str) else paths[0])
-        self._storage.save(path)
         with self._lock:
-            self._pending_data_root = path if path != self._data_root else None
-        return {"changed": True, "restart_required": self._pending_data_root is not None}
+            if self._selecting_directory:
+                raise ExportError("DATA_DIRECTORY_BUSY")
+            self._selecting_directory = True
+        try:
+            paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+            if not paths:
+                return {"changed": False}
+            path = validate_data_directory(paths if isinstance(paths, str) else paths[0])
+            self._storage.save(path)
+            with self._lock:
+                first_selection = self._data_root is None
+                if first_selection:
+                    self._resources = ResourceManager(path / "resources")
+                    self._data_root = path
+                self._pending_data_root = path if path != self._data_root else None
+            if first_selection:
+                self._initialize_resources()
+            return {
+                "changed": True,
+                "restart_required": self._pending_data_root is not None,
+                "first_selection": first_selection,
+            }
+        finally:
+            with self._lock:
+                self._selecting_directory = False
 
     @_safe
     def open_data_folder(self):
+        if self._data_root is None:
+            raise ExportError("DATA_DIRECTORY_REQUIRED")
         os.startfile(str(local_directory_path(self._data_root)))
 
     @_safe

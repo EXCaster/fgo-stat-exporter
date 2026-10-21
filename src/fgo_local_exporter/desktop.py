@@ -17,8 +17,8 @@ from fgo_local_exporter.desktop_reports import engine_source
 from fgo_local_exporter.desktop_resources import ResourceManager
 from fgo_local_exporter.desktop_storage import (
     StorageSettings,
-    choose_startup_directory,
-    create_browser_directory,
+    browser_session_directory,
+    read_startup_directory,
 )
 from fgo_local_exporter.local_api import create_app
 from fgo_local_exporter.settings import LocalConfig
@@ -61,13 +61,11 @@ def main():
     logging.disable(logging.CRITICAL)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     storage = StorageSettings()
-    data_root = choose_startup_directory(args.data_dir, settings=storage)
-    if data_root is None:
-        return
+    data_root = read_startup_directory(args.data_dir, settings=storage)
     source = engine_source()
     if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(source))
-    resources = ResourceManager(data_root / "resources")
+    resources = ResourceManager(data_root / "resources") if data_root is not None else None
     server = None
     for _ in range(5):
         with socket.socket() as sock:
@@ -97,14 +95,9 @@ def main():
     )
     if bundled.is_dir():
         bridge._asset_root = bundled
-    active = resources.restore_active()
-    if active is not None:
-        bridge._attach_resources(active)
-    elif bundled.is_dir():
-        bridge._attach_resources(resources.cache_existing(bundled))
+    if resources is not None:
+        bridge._initialize_resources()
     bridge._restore_profile()
-    if resources.current is not None:
-        resources.prepare(bridge._attach_resources)
     window = webview.create_window(
         f"FGO 抓包统计 {__version__}",
         config.origin,
@@ -120,14 +113,16 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        webview.start(
-            gui="edgechromium",
-            private_mode=True,
-            debug=False,
-            storage_path=str(create_browser_directory(data_root)),
-        )
+        with browser_session_directory(data_root) as browser_directory:
+            webview.start(
+                gui="edgechromium",
+                private_mode=True,
+                debug=False,
+                storage_path=str(browser_directory),
+            )
     finally:
-        resources.stop.set()
+        if bridge._resources is not None:
+            bridge._resources.stop.set()
         bridge._store.close()
         server.shutdown()
         server.server_close()
