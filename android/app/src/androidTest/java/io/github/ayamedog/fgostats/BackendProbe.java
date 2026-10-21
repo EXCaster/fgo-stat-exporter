@@ -7,13 +7,23 @@ import com.chaquo.python.android.AndroidPlatform;
 
 /** 在目标安卓解释器中运行人工数据检查，只返回错误类型和代码位置。 */
 public final class BackendProbe extends Instrumentation {
-    @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+    private int inputPort;
+    @Override public void onCreate(Bundle arguments) {
+        super.onCreate(arguments);
+        if (arguments != null) {
+            try { inputPort = Integer.parseInt(arguments.getString("input_port", "0")); }
+            catch (NumberFormatException ignored) { }
+        }
+        if (inputPort < 1024 || inputPort > 65535) inputPort = 0;
+        start();
+    }
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            ResourceInstaller.prepare(getTargetContext());
             if (!Python.isStarted()) Python.start(new AndroidPlatform(getTargetContext()));
             String script =
-                "import json,traceback,threading\n" +
+                "import json,traceback,threading,time,urllib.request\n" +
                 "from pathlib import Path\n" +
                 "result={}\n" +
                 "try:\n" +
@@ -24,8 +34,12 @@ public final class BackendProbe extends Instrumentation {
                 "'cache':{'serverTime':1792500000,'replaced':{'userGame':[{" +
                 "'userId':123,'friendCode':'123456789012','name':'人工测试','rkchannel':24," +
                 "'createdAt':1477000000,'lv':1}],'userSvt':[],'userSvtCollection':[]}}}).encode()\n" +
+                " if INPUT_PORT:\n" +
+                "  with urllib.request.urlopen('http://127.0.0.1:'+str(INPUT_PORT)+'/',timeout=10) as source:raw=source.read(16*1024*1024+1)\n" +
+                " started=time.monotonic()\n" +
                 " document=app._store.builder.render(raw,{'friend':False,'support':True},threading.Event())\n" +
-                " result={'ok':True,'html_bytes':len(document.html),'assets':len(document.assets)}\n" +
+                " raw=None\n" +
+                " result={'ok':True,'seconds':round(time.monotonic()-started,2),'html_bytes':len(document.html),'assets':len(document.assets)}\n" +
                 " app.close()\n" +
                 "except BaseException as error:\n" +
                 " while error.__context__ is not None:error=error.__context__\n" +
@@ -43,6 +57,7 @@ public final class BackendProbe extends Instrumentation {
                 "RESULT=json.dumps(result,ensure_ascii=False)\n";
             com.chaquo.python.PyObject namespace = Python.getInstance().getBuiltins().callAttr("dict");
             namespace.callAttr("__setitem__", "ROOT", getTargetContext().getFilesDir().getPath());
+            namespace.callAttr("__setitem__", "INPUT_PORT", inputPort);
             Python.getInstance().getBuiltins().callAttr("exec", script, namespace);
             result.putString("probe", namespace.callAttr("__getitem__", "RESULT").toString());
         } catch (Exception error) { result.putString("probe", "PROBE_FAILED:" + error.getClass().getSimpleName()); }

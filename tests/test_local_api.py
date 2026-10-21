@@ -48,8 +48,10 @@ class Builder:
     def revision(self):
         return "synthetic-shared-revision"
 
-    def render(self, raw, options, cancel):
+    def render(self, raw, options, cancel, *, progress=None):
         self.options = options
+        if progress is not None:
+            progress("images", 1, 3)
         self.entered.set()
         self.release.wait(2)
         data = json.loads(raw)
@@ -208,11 +210,17 @@ def test_clearing_inflight_report_cannot_restore_data(app, capture):
     import_capture(client, headers, capture)
     post(client, "/api/report", headers, {"friend": False, "support": False})
     assert builder.entered.wait(1)
+    assert get(client, "/api/state").json["report_progress"] == {
+        "stage": "images",
+        "completed": 1,
+        "total": 3,
+    }
     post(client, "/api/clear", headers, {})
     builder.release.set()
     state = get(client, "/api/state").json
     assert state["phase"] == "cleared" and state["report_phase"] == "idle"
     assert not state["report_version"] and not state["download_ready"]
+    assert state["report_progress"] == {}
 
 
 def test_statistics_expiry_also_clears_report_and_assets(app, capture):

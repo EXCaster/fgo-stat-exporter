@@ -23,6 +23,19 @@ ATLAS = "https://api.atlasacademy.io/repo/CN/master/"
 NEW_SERVANT, NEW_CE = 990006, 880007
 
 
+@pytest.mark.parametrize("radius", [1, 3, 8])
+def test_fast_outline_filter_preserves_every_pixel(radius):
+    import random
+
+    from PIL import ImageFilter
+
+    from fgo_stat_core.infrastructure.native_support_ui.typography import _expand_alpha
+
+    image = Image.frombytes("L", (160, 32), random.Random(17).randbytes(160 * 32))
+    original = image.filter(ImageFilter.MaxFilter(radius * 2 + 1))
+    assert _expand_alpha(image, radius).tobytes() == original.tobytes()
+
+
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True).encode()
 

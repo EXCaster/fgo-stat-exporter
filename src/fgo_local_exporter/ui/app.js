@@ -18,6 +18,7 @@
     REPORT_NOT_CONFIGURED: "统计资源尚未就绪，请检查或修复字典。",
     REPORT_ENGINE_RESTART_REQUIRED: "统计模块已更新，请重启程序后继续生成统计图。",
     REPORT_QUEUE_TIMEOUT: "报告队列暂时繁忙，请稍后重试。",
+    REPORT_IMAGE_TIMEOUT: "图片下载超过一分钟，请检查网络后重新生成；已经下载的公开图片会保留。",
     REPORT_EXPIRED: "这份报告已清除或过期，请重新生成。",
     REPORT_IMAGE_MISSING: "部分统计图片尚未下载，请检查网络后重新生成。",
     REPORT_BUILD_FAILED: "报告未能完成，请保留错误码供排查。统计 JSON 仍可单独下载。",
@@ -30,10 +31,16 @@
   };
   let mode = "qr", selectedFile = null, current = null, pending = false, qrGeneration = -1;
   let shownReport = "", imageBusy = false, blobUrls = [], frameHeight = 0;
+  let countdownEndsAt = 0;
   const describe = code => errors[code] || "本次操作未完成，请核对文件或重新尝试。排查时只需提供错误码。";
   const server = () => document.querySelector('input[name="server"]:checked')?.value || "";
   const size = bytes => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(2)} MB` : `${(bytes / 1024).toFixed(1)} KB`;
   const remaining = seconds => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  function updateCountdown() {
+    const seconds = Math.max(0, Math.ceil((countdownEndsAt - performance.now()) / 1000));
+    if (current?.download_ready) $("data-remaining").textContent = remaining(seconds);
+    if (current?.has_qr) $("qr-badge").textContent = current.phase === "waiting_confirm" ? "已扫码，请在手机确认" : `${current.server_name} · ${remaining(seconds)}`;
+  }
   const mobileSaving = () => window.matchMedia("(pointer: coarse), (max-width: 740px)").matches;
   const date = value => value ? new Intl.DateTimeFormat("zh-CN", {timeZone:"Asia/Shanghai", year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(value * 1000)) : "未提供";
 
@@ -66,7 +73,7 @@
     const reportWorking = ["queued", "building"].includes(current?.report_phase);
     $("build-report").disabled = pending || reportWorking || !current?.download_ready || !current?.report_available;
     $("build-report").textContent = reportWorking ? "正在生成统计图…" : current?.report_phase === "ready" ? "重新生成统计图 ↗" : "生成统计图 ↗";
-    $("report-note").textContent = reportWorking ? (current.report_phase === "queued" ? "正在排队，请稍候…" : "正在计算并整理统计数据…") : current?.download_ready ? "图片在你的浏览器中合成。" : "请先扫码获取或导入数据。";
+    $("report-note").textContent = reportWorking ? (current.report_phase === "queued" ? "正在排队，请稍候…" : reportProgress(current.report_progress)) : current?.download_ready ? "图片在你的浏览器中合成。" : "请先扫码获取或导入数据。";
     $("download-image").disabled = imageBusy || !shownReport;
     $("download-sections").disabled = imageBusy || !shownReport;
   }
@@ -78,6 +85,11 @@
       $(item + "-pane").hidden = item !== value;
     }
     controls();
+  }
+  function reportProgress(value) {
+    const stages = {parsing:"正在读取统计数据…", calculating:"正在计算统计…", images:"正在准备图片", support:"正在绘制助战", layout:"正在整理统计图…"};
+    const text = stages[value?.stage] || "正在准备统计图…";
+    return value?.total ? `${text} ${value.completed} / ${value.total}…` : text;
   }
   function discardImages() {
     blobUrls.forEach(url => URL.revokeObjectURL(url));
@@ -94,6 +106,7 @@
   }
   function render(value) {
     current = value;
+    countdownEndsAt = performance.now() + Math.max(0, value.remaining_seconds || 0) * 1000;
     $("status-message").textContent = ["ready", "cleared"].includes(value.phase) ? (value.phase === "cleared" ? "本次记录已清除，可以重新扫码或导入文件。" : "选择扫码登录，或导入已有文件。") : value.message;
     $("status-line").className = "status-line" + (busy.has(value.phase) ? " busy" : value.phase === "complete" ? " complete" : value.phase === "error" ? " error" : "");
     $("live-tag").textContent = value.phase === "complete" ? "数据就绪" : busy.has(value.phase) ? "正在读取" : value.phase === "expired" ? "已过期" : "等待数据";
@@ -104,7 +117,6 @@
         qrGeneration = value.generation;
       }
       $("qr-image").hidden = false; $("qr-empty").hidden = true; $("qr-badge").hidden = false;
-      $("qr-badge").textContent = value.phase === "waiting_confirm" ? "已扫码，请在手机确认" : `${value.server_name} · ${remaining(value.remaining_seconds)}`;
     } else {
       $("qr-image").hidden = true; $("qr-image").removeAttribute("src");
       $("qr-empty").hidden = false; $("qr-badge").hidden = true; qrGeneration = -1;
@@ -122,7 +134,6 @@
       $("captured-at").textContent = date(p.captured_at);
       $("table-count").textContent = `${Object.keys(p.tables).length} 张数据表`;
       $("file-size").textContent = size(p.bytes);
-      $("data-remaining").textContent = remaining(value.remaining_seconds);
     }
     $("error-box").hidden = !value.error;
     if (value.error) showError(value.error);
@@ -137,7 +148,7 @@
     } else if (shownReport && (!value.report_version || !complete)) {
       clearReport();
     }
-    controls();
+    updateCountdown(); controls();
   }
   async function poll() {
     try { render(await api("/api/state")); }
@@ -294,5 +305,6 @@
   $("download-image").addEventListener("click", () => saveImages(false));
   $("download-sections").addEventListener("click", () => saveImages(true));
   window.addEventListener("resize", fitFrame);
+  window.setInterval(updateCountdown, 1000);
   controls(); poll();
 })();

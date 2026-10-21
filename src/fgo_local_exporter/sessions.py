@@ -55,6 +55,7 @@ class LocalSession(LoginSession):
         self.document = None
         self.report_version = ""
         self.report_phase, self.report_error = ("idle", "")
+        self.report_progress = {}
         self.report_cancel = threading.Event()
         self.failure_phase = ""
 
@@ -65,6 +66,7 @@ class LocalSession(LoginSession):
             self.document = None
             self.report_version = ""
             self.report_phase, self.report_error = ("idle", "")
+            self.report_progress = {}
             self.source = ""
             self.failure_phase = ""
             self.store.budget.set(self.identifier, 0)
@@ -84,6 +86,7 @@ class LocalSession(LoginSession):
                     "report_available": self.store.builder is not None,
                     "report_phase": self.report_phase,
                     "report_error": self.report_error,
+                    "report_progress": dict(self.report_progress),
                     "report_version": self.report_version,
                     "report_revision": self.document.revision if self.document else "",
                     "engine_revision": self.store.builder.revision() if self.store.builder else "",
@@ -228,6 +231,7 @@ class LocalSession(LoginSession):
                 self.document = None
                 self.store.budget.set(self.identifier, len(self.export))
                 self.report_phase, self.report_error = ("queued", "")
+                self.report_progress = {}
                 args = (self.export, options, self.generation, self.report_cancel)
             threading.Thread(target=self._report, args=args, daemon=True).start()
         except BaseException:
@@ -245,7 +249,14 @@ class LocalSession(LoginSession):
                 if cancel.is_set() or generation != self.generation:
                     return
                 self.report_phase = "building"
-            document = self.store.builder.render(raw, options, cancel)
+
+            def progress(stage, completed, total):
+                with self.lock:
+                    if cancel.is_set() or generation != self.generation:
+                        raise ExportError("CANCELLED")
+                    self.report_progress = {"stage": stage, "completed": completed, "total": total}
+
+            document = self.store.builder.render(raw, options, cancel, progress=progress)
             with self.lock:
                 self.state()
                 if cancel.is_set() or generation != self.generation:

@@ -76,14 +76,20 @@ class ReportBuilder:
             digest.update((directory / "SOURCE_MANIFEST.json").read_bytes())
         return digest.hexdigest()[:16]
 
-    def render(self, raw, options, cancelled):
+    def render(self, raw, options, cancelled, *, progress=None):
+        def checkpoint(stage, completed=0, total=0):
+            if cancelled.is_set():
+                raise ExportError("CANCELLED")
+            if progress is not None:
+                progress(stage, completed, total)
+
         try:
+            checkpoint("parsing")
             if self.revision() != self._revision:
                 raise ExportError("REPORT_ENGINE_RESTART_REQUIRED")
             from fgo_stat_core.features.capture_import.parser import parse_capture
             from fgo_stat_core.features.report.calculator import build_report
             from fgo_stat_core.infrastructure.report_assets import (
-                fetch_report_assets,
                 plan_report_assets,
             )
             from fgo_stat_core.infrastructure.report_master import load_report_master
@@ -94,6 +100,7 @@ class ReportBuilder:
             snapshot = parse_capture(raw, secrets.token_bytes(32), report_fields=True)
             if self._master is None:
                 self._master = load_report_master(self.config.data_dir, self.config.atlas_dir)
+            checkpoint("calculating")
             report = build_report(
                 snapshot,
                 self._master,
@@ -104,7 +111,7 @@ class ReportBuilder:
             specs = plan_report_assets(
                 report, self.config.data_dir, native_support=options["support"]
             )
-            asyncio.run(fetch_report_assets(specs, self.config.asset_dir))
+            asyncio.run(_prepare_images(specs, self.config.asset_dir, cancelled, checkpoint))
             support_html, native_assets = None, {}
             if options["support"] and self.config.native_ui_dir is not None:
                 from fgo_stat_core.infrastructure.native_support_render import render_native_blocks
@@ -119,7 +126,10 @@ class ReportBuilder:
                         if self.config.regular_font
                         else {}
                     ),
+                    progress=lambda completed, total: checkpoint("support", completed, total),
+                    cancelled=cancelled.is_set,
                 )
+            checkpoint("layout")
             data = report.model_dump(mode="json")
             source = build(data, asset_dir=self.config.asset_dir, support_html=support_html)
             # 只调整固定标题，角色名和计算结果保持统计引擎的输出。
@@ -195,3 +205,48 @@ class ReportBuilder:
                 "REPORT_ASSET_PATH_INVALID",
             }
             raise ExportError(code if code in allowed else "REPORT_BUILD_FAILED") from None
+
+
+async def _prepare_images(specs, cache, cancelled, progress, *, timeout=60):
+    """整批图片共用等待上限，清除会话时终止尚未完成的下载。"""
+    from fgo_stat_core.infrastructure.public_download import PublicImageDownloader
+    from fgo_stat_core.infrastructure.report_assets import fetch_report_assets
+
+    present = sum((cache / spec.filename).is_file() for spec in specs)
+    completed = present
+    progress("images", completed, len(specs))
+    source = PublicImageDownloader(timeout=15)
+
+    class Downloader:
+        async def fetch(self, url):
+            nonlocal completed
+            try:
+                return await source.fetch(url)
+            finally:
+                completed += 1
+                progress("images", completed, len(specs))
+
+    async def cancellation():
+        while not cancelled.is_set():
+            await asyncio.sleep(0.1)
+
+    async def prepare():
+        async with source:
+            return await fetch_report_assets(specs, cache, Downloader())
+
+    downloads = asyncio.create_task(prepare())
+    cancellation_task = asyncio.create_task(cancellation())
+    try:
+        done, _ = await asyncio.wait(
+            {downloads, cancellation_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if cancelled.is_set():
+            raise ExportError("CANCELLED")
+        if downloads not in done:
+            raise ExportError("REPORT_IMAGE_TIMEOUT")
+        return await downloads
+    finally:
+        for task in (downloads, cancellation_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(downloads, cancellation_task, return_exceptions=True)

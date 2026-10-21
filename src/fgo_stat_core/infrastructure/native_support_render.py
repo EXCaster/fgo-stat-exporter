@@ -5,7 +5,7 @@ import html
 import io
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Literal, cast
 
@@ -103,6 +103,8 @@ def render_native_blocks(
     demo: bool = False,
     header_font: Path | None = None,
     regular_font: Path | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str, dict[str, bytes]]:
     from fgo_stat_core.infrastructure.native_support_ui.renderer import NativeSlot, build_image
 
@@ -111,6 +113,8 @@ def render_native_blocks(
     blocks: list[str] = []
     images: dict[str, bytes] = {}
     panels = native_panels(report)
+    if progress is not None:
+        progress(0, len(panels))
     if report.supports is not None:
         if report.supports.value is None:
             blocks.append('<p class="support-note">普通／活动助战数据未提供或不完整</p>')
@@ -131,6 +135,8 @@ def render_native_blocks(
     )
     font_bytes = bank.formation_font() if needs_font else None
     for number, panel in enumerate(panels):
+        if cancelled is not None and cancelled():
+            raise CaptureError("CANCELLED")
         title = "冠位助战" if panel.card == "grand" else panel.title.split(" · ", 1)[0]
         blocks.append(f'<h3 style="margin:20px 0 8px">{html.escape(title)}</h3>')
         states: tuple[Literal["both"], ...] = ("both",)
@@ -172,6 +178,8 @@ def render_native_blocks(
                 f'<img src="{uri}" alt="{html.escape(title, quote=True)}" '
                 'style="display:block;width:100%;height:auto;margin:0 0 10px">'
             )
+        if progress is not None:
+            progress(number + 1, len(panels))
     if not panels and report.grand_supports is not None:
         blocks.append('<p class="support-note">冠位助战数据未提供</p>')
     return "".join(blocks), images

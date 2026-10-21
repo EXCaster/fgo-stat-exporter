@@ -13,6 +13,13 @@ SCALE = 8
 REGULAR = report_font_path("regular")
 
 
+def _expand_alpha(image: Image.Image, radius: int) -> Image.Image:
+    """将大方形最大值滤波分解为小核，保留相同边缘与像素结果。"""
+    for _ in range(radius):
+        image = image.filter(ImageFilter.MaxFilter(3))
+    return image
+
+
 def bitmap_line(
     text: str,
     size: float,
@@ -82,14 +89,14 @@ def bitmap_line(
     # 字重修正与黑色描边分别处理，先分开字形再扩张，避免相邻数字粘连。
     alpha = canvas.getchannel("A")
     # 白色字形扩张控制在 0.375 个原生单位，分隔符使用独立单元。
-    alpha = alpha.filter(ImageFilter.MaxFilter(7))
+    alpha = _expand_alpha(alpha, 3)
     white = Image.new("RGBA", canvas.size, "white")
     white.putalpha(alpha)
     canvas = white
     radius = max(0, round(outline * SCALE))
     if radius:
         black = Image.new("RGBA", canvas.size, "black")
-        black.putalpha(alpha.filter(ImageFilter.MaxFilter(radius * 2 + 1)))
+        black.putalpha(_expand_alpha(alpha, radius))
         black.alpha_composite(canvas)
         canvas = black
     bbox = canvas.getbbox()
