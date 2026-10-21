@@ -1,0 +1,10 @@
+.desktop-status{padding:18px;margin-bottom:20px}
+.desktop-directory{grid-template-columns:1fr;gap:8px}
+.desktop-directory input{font-size:14px}
+.topbar .top-note{font-size:14px}
+.desktop-resource-details{display:block}
+body{padding-bottom:70px}
+.mobile-navigation{position:fixed;z-index:100;bottom:0;left:0;right:0;display:flex;background:#f5fbfd;border-top:1px solid #b8d6e0;padding:10px 12px;gap:10px}
+.mobile-navigation button{flex:1;min-height:42px;border:1px solid #a3c6d6;border-radius:5px;background:white;color:#24647e;font:600 16px sans-serif}
+#entry-title,#report-title,#local-setup-title{scroll-margin-top:18px}
+@media(max-width:740px){.desktop-status p{font-size:15px}.desktop-status .section-label{margin-bottom:12px}}

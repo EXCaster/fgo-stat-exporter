@@ -1,0 +1,364 @@
+"""用人工字典模拟上游更新，不请求网络、不使用账号数据。"""
+
+import asyncio
+import hashlib
+import io
+import json
+import threading
+from types import SimpleNamespace
+
+import pytest
+from PIL import Image
+
+from fgo_local_exporter.desktop_resources import ResourceManager
+from fgo_local_exporter.errors import ExportError
+from fgo_local_exporter.resource_catalog import PublicResourceClient, discover_catalog
+from fgo_stat_core.infrastructure.report_assets import fetch_report_assets, plan_report_assets
+from fgo_stat_core.infrastructure.report_master import load_report_master
+
+DATA = "https://raw.githubusercontent.com/chaldea-center/chaldea-data/main/dist/"
+INFO = "https://api.atlasacademy.io/export/CN/info.json"
+EXTRA = "https://data-cn.chaldea.center/mstGachaCNExtra.json"
+ATLAS = "https://api.atlasacademy.io/repo/CN/master/"
+NEW_SERVANT, NEW_CE = 990006, 880007
+
+
+def encoded(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True).encode()
+
+
+class SyntheticUpstream:
+    def __init__(self):
+        self.files = {
+            "items.json": [],
+            "entities.json": [],
+            "baseSkills.json": [],
+            "classBoards.json": [],
+            "grandGraphs.json": [],
+            "constData.json": {},
+            "mappingPatch.json": {},
+        }
+        for prefix, count in (
+            ("servants", 5),
+            ("craftEssences", 6),
+            ("wiki.servants", 5),
+            ("wars", 5),
+        ):
+            self.files.update({f"{prefix}.{i}.json": [] for i in range(1, count + 1)})
+        self.files["mappingData.1.json"] = {"entity_release": {"CN": []}}
+        self.gacha, self.shop, self.extra = [], [], []
+        self.timestamp = 1_800_000_001
+        self.atlas_hash = "abcdef"
+        self.requests = []
+        self.failure = self.bad_hash = self.block = ""
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.after_file = None
+
+    def version(self):
+        return encoded(
+            {
+                "timestamp": self.timestamp,
+                "files": {
+                    name: {
+                        "filename": name,
+                        "size": len(encoded(value)),
+                        "hash": hashlib.md5(encoded(value), usedforsecurity=False).hexdigest()[:6],
+                    }
+                    for name, value in self.files.items()
+                },
+            }
+        )
+
+    def get(self, url, limit, *, progress=None, stop=None):
+        self.requests.append(url)
+        if url == self.failure:
+            raise ExportError("RESOURCE_DOWNLOAD_FAILED")
+        if stop is not None and stop.is_set():
+            raise ExportError("CANCELLED")
+        if url == self.block:
+            self.entered.set()
+            assert self.release.wait(3)
+        if url == DATA + "version.json":
+            raw = self.version()
+        elif url == INFO:
+            raw = encoded({"hash": self.atlas_hash, "dataVer": 1, "timestamp": self.timestamp})
+        elif url == EXTRA:
+            raw = encoded(self.extra)
+        elif url == ATLAS + "mstGacha.json":
+            raw = encoded(self.gacha)
+        elif url == ATLAS + "mstShop.json":
+            raw = encoded(self.shop)
+        elif url.startswith(DATA):
+            raw = encoded(self.files[url.removeprefix(DATA)])
+        else:
+            raise AssertionError("出现非预期资源请求")
+        if url == self.bad_hash:
+            raw = raw.replace(b"990006", b"990009")
+        assert len(raw) <= limit
+        if progress:
+            progress(len(raw))
+        if self.after_file and url != DATA + "version.json":
+            self.after_file(url)
+        return raw
+
+    def add_new_content(self):
+        self.timestamp += 1
+        self.files["servants.6.json"] = [
+            {
+                "id": NEW_SERVANT,
+                "collectionNo": 6,
+                "name": "New Servant",
+                "rarity": 5,
+                "classId": 1,
+                "extraAssets": {
+                    "charaGraph": {
+                        "ascension": {
+                            "1": "https://static.atlasacademy.io/CN/CharaGraph/990006.png"
+                        }
+                    },
+                    "status": {
+                        "ascension": {
+                            "1": "https://static.atlasacademy.io/CN/CharaFigure/990006.png"
+                        }
+                    },
+                },
+            }
+        ]
+        self.files["craftEssences.7.json"] = [
+            {
+                "id": NEW_CE,
+                "name": "New CE",
+                "extraAssets": {
+                    "faces": {
+                        "equip": {"1": "https://static.atlasacademy.io/CN/EquipFaces/880007.png"}
+                    },
+                },
+            }
+        ]
+        self.files["wiki.servants.6.json"] = [{"collectionNo": 6, "obtains": ["limited"]}]
+        self.files["wars.6.json"] = [
+            {
+                "spots": [
+                    {
+                        "quests": [
+                            {
+                                "id": 990006,
+                                "name": "New Quest",
+                                "type": "free",
+                                "afterClear": "repeatLast",
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+        self.files["mappingData.1.json"]["entity_release"]["CN"] = [NEW_SERVANT, NEW_CE]
+        self.files["mappingPatch.json"] = {
+            "svt_names": {"New Servant": {"CN": "测试新增从者"}},
+            "ce_names": {"New CE": {"CN": "测试新增礼装"}},
+            "summon_names": {"New Gacha": {"CN": "测试新增卡池"}},
+        }
+        self.extra = [
+            {
+                "id": 990007,
+                "name": "New Gacha",
+                "type": 1,
+                "openedAt": 1_800_000_000,
+                "closedAt": 1_900_000_000,
+                "imageId": 990007,
+            }
+        ]
+
+
+def checked(manager):
+    activated = []
+    manager.prepare(activated.append)
+    manager._thread.join(3)
+    assert not manager._thread.is_alive()
+    return activated
+
+
+@pytest.fixture
+def resources(tmp_path):
+    manager, upstream = ResourceManager(tmp_path), SyntheticUpstream()
+    manager.client = upstream
+    assert checked(manager)
+    upstream.requests.clear()
+    return manager, upstream
+
+
+def test_update_loads_new_parts_names_gachas_and_required_images(resources):
+    manager, upstream = resources
+    old = manager.current
+    old_bytes = (old / "data/mappingPatch.json").read_bytes()
+    upstream.add_new_content()
+    assert checked(manager)
+    state = manager.state()
+    assert state["phase"] == "ready" and state["result"] == "updated"
+    assert manager.current != old
+    assert (old / "data/mappingPatch.json").read_bytes() == old_bytes
+    master = load_report_master(manager.current / "data", manager.current / "atlas-cn")
+    assert master.servants[NEW_SERVANT].name == "测试新增从者"
+    assert master.craft_essences[NEW_CE].name == "测试新增礼装"
+    assert master.gachas[990007].name == "测试新增卡池"
+    assert 990006 in master.quests
+    assert DATA + "items.json" not in upstream.requests
+    assert ATLAS + "mstGacha.json" in upstream.requests
+    report = SimpleNamespace(
+        favorites=SimpleNamespace(value=[SimpleNamespace(servant_id=NEW_SERVANT, roles=["push"])]),
+        supports=SimpleNamespace(
+            value=[
+                SimpleNamespace(
+                    slots=[
+                        SimpleNamespace(
+                            state="ready",
+                            servant_id=NEW_SERVANT,
+                            craft_essence=SimpleNamespace(craft_essence_id=NEW_CE),
+                        )
+                    ]
+                )
+            ]
+        ),
+        grand_supports=None,
+        gachas=SimpleNamespace(
+            value=SimpleNamespace(
+                all_time=[SimpleNamespace(banner_image_id=990007)],
+                selected_pool_year=[],
+            )
+        ),
+    )
+    specs = plan_report_assets(report, manager.current / "data", native_support=True)
+    names = {s.filename for s in specs}
+    assert {f"hero-{NEW_SERVANT}.png", f"ce-{NEW_CE}.png", "banner-image-990007.png"} <= names
+    output = io.BytesIO()
+    Image.new("RGBA", (8, 8), (0, 0, 0, 0)).save(output, "PNG")
+
+    class Images:
+        async def fetch(self, url):
+            return output.getvalue()
+
+    cache = manager.image_cache(old, manager.current)
+    counts = asyncio.run(fetch_report_assets(specs, cache, Images()))
+    assert counts["downloaded"] == counts["available"] == len(specs)
+    assert (cache / f"ce-{NEW_CE}.png").is_file()
+    restored = ResourceManager(manager.root)
+    assert restored.restore_active() == manager.current
+    assert restored.version == manager.version
+
+
+def test_unchanged_check_reuses_all_files_without_replacing_active_version(resources):
+    manager, upstream = resources
+    old = manager.current
+    assert checked(manager) == []
+    assert manager.current == old
+    assert manager.state()["result"] == "current"
+    assert manager.state()["repaired"] == 0
+    assert set(upstream.requests) == {DATA + "version.json", INFO, EXTRA}
+
+
+@pytest.mark.parametrize("failure", ["network", "hash", "format", "race", "cancel"])
+def test_failed_update_preserves_active_files_pointer_and_builder(resources, failure):
+    manager, upstream = resources
+    old = manager.current
+    pointer = (manager.root / "active.json").read_bytes()
+    previous = (old / "data/mappingPatch.json").read_bytes()
+    upstream.add_new_content()
+    if failure == "network":
+        upstream.failure = DATA + "servants.6.json"
+    elif failure == "hash":
+        upstream.bad_hash = DATA + "servants.6.json"
+    elif failure == "format":
+        upstream.files["servants.6.json"] = [{"missingId": True}]
+    elif failure == "race":
+        upstream.after_file = lambda url: setattr(upstream, "timestamp", upstream.timestamp + 1)
+    else:
+        manager.stop.set()
+    assert checked(manager) == []
+    assert manager.current == old and manager.state()["ready"]
+    assert manager.state()["phase"] == "error"
+    assert manager.state()["last_checked_at"] == 0
+    assert (manager.root / "active.json").read_bytes() == pointer
+    assert (old / "data/mappingPatch.json").read_bytes() == previous
+    assert not list(manager.root.glob(".staging-*"))
+
+
+def test_download_progress_remains_visible_and_concurrent_check_is_rejected(resources):
+    manager, upstream = resources
+    upstream.add_new_content()
+    upstream.block = DATA + "servants.6.json"
+    manager.prepare(lambda path: None)
+    try:
+        assert upstream.entered.wait(3)
+        state = manager.state()
+        assert state["ready"] and state["phase"] == "downloading"
+        assert state["current_file"] == "servants.6.json"
+        assert 0 < state["completed"] < state["total"]
+        with pytest.raises(ExportError, match="OPERATION_NOT_READY"):
+            manager.prepare(lambda path: None)
+    finally:
+        upstream.release.set()
+        manager._thread.join(3)
+    assert manager.state()["result"] == "updated"
+
+
+def test_corrupted_active_file_is_repaired_in_new_directory(resources):
+    manager, upstream = resources
+    old = manager.current
+    (old / "data/items.json").write_bytes(b"broken")
+    assert checked(manager)
+    assert manager.current != old
+    assert (manager.current / "data/items.json").read_bytes() == b"[]"
+    assert upstream.requests.count(DATA + "items.json") == 1
+
+
+def test_incomplete_new_parts_are_rejected_before_any_switch(resources):
+    manager, upstream = resources
+    upstream.files["servants.7.json"] = []
+    assert checked(manager) == []
+    assert manager.state()["error"] == "RESOURCE_CATALOG_INCOMPLETE"
+
+
+def test_failed_builder_switch_rolls_back_without_replacing_active_pointer(resources):
+    manager, upstream = resources
+    old, calls = manager.current, []
+    pointer = (manager.root / "active.json").read_bytes()
+    upstream.add_new_content()
+
+    def activate(path):
+        calls.append(path)
+        if path != old:
+            raise ExportError("RESOURCE_FORMAT_UNSUPPORTED")
+
+    manager.prepare(activate)
+    manager._thread.join(3)
+    assert calls[-1] == old
+    assert manager.current == old
+    assert manager.state()["phase"] == "error"
+    assert (manager.root / "active.json").read_bytes() == pointer
+
+
+def test_restart_rejects_an_active_pointer_outside_resource_directory(resources):
+    manager, _ = resources
+    (manager.root / "active.json").write_bytes(encoded({"directory": "../private"}))
+    assert ResourceManager(manager.root).restore_active() is None
+
+
+def test_public_download_bounds_and_redirects_are_enforced(monkeypatch):
+    class Client:
+        def open(self, request, **kwargs):
+            return io.BytesIO(b"x" * 5)
+
+    monkeypatch.setattr("urllib.request.build_opener", lambda *args: Client())
+    with pytest.raises(ExportError, match="RESOURCE_SIZE_LIMIT"):
+        PublicResourceClient().get(DATA + "items.json", 4)
+
+
+def test_catalog_ignores_arbitrary_urls_in_upstream_data():
+    upstream = SyntheticUpstream()
+    upstream.files["unneeded.json"] = {"url": "http://127.0.0.1/private"}
+    catalog = discover_catalog(upstream, threading.Event())
+    assert all(
+        f["filename"] != "unneeded.json"
+        for group in catalog.manifest["groups"].values()
+        for f in group["files"]
+    )

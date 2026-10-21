@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fgo-local-exporter"
+version = "0.4.2"
+description = "FGO 国服本机扫码、文件导入和统计图片工具"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+dependencies = ["qrcode==8.2", "pycryptodome==3.23.0"]
+
+[project.optional-dependencies]
+desktop = [
+    "Flask==3.1.3", "pydantic==2.14.1", "Pillow==12.3.0", "httpx==0.28.1",
+    "pywebview==6.2.1; sys_platform == 'win32'",
+    "tzdata==2026.5; sys_platform == 'win32'",
+]
+[project.scripts]
+fgo-stat-desktop = "fgo_local_exporter.desktop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fgo_local_exporter = ["ui/*", "desktop_static/*", "mobile_static/*"]
+fgo_stat_core = ["infrastructure/report_ui/*.html", "infrastructure/native_support_ui/*.json"]
+
+[dependency-groups]
+build = ["pyinstaller==6.22.3"]
+dev = ["pytest==9.1.1", "ruff==0.17.1", "mypy==2.4.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

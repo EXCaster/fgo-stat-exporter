@@ -1,0 +1,73 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+def prepared = providers.gradleProperty('preparedDir').get()
+def releaseKey = System.getenv('FGO_ANDROID_KEYSTORE')
+android {
+    namespace 'io.github.ayamedog.fgostats'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'io.github.ayamedog.fgostats'
+        minSdk 24
+        targetSdk 35
+        versionCode 6
+        versionName '0.4.2'
+        testInstrumentationRunner 'io.github.ayamedog.fgostats.BackendProbe'
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+    }
+    sourceSets.main.assets.srcDirs = [prepared + '/assets']
+    signingConfigs {
+        if (releaseKey != null) {
+            production {
+                storeFile file(releaseKey)
+                storePassword System.getenv('FGO_ANDROID_STORE_PASSWORD')
+                keyAlias System.getenv('FGO_ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('FGO_ANDROID_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (releaseKey != null) signingConfig signingConfigs.production
+        }
+    }
+    packaging { jniLibs { useLegacyPackaging false } }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+chaquopy {
+    sourceSets.main.srcDirs = [prepared + '/python']
+    defaultConfig {
+        version '3.13'
+        buildPython providers.gradleProperty('buildPython').get()
+        pip {
+            options '--find-links', providers.gradleProperty('wheelDir').get()
+            install '-r', rootProject.file('requirements.txt').path
+        }
+        pyc { src = true; pip = true; stdlib = true }
+    }
+}
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}
+
+// 在生成依赖归档前排除测试、类型声明和扩展源码。
+afterEvaluate {
+    ['Debug', 'Release'].each { variant ->
+        tasks.named("generate${variant}PythonRequirementsAssets").configure {
+            inputs.file(rootProject.file('../tools/clean_android_runtime.py'))
+            doFirst {
+                project.exec { spec ->
+                    spec.commandLine providers.gradleProperty('buildPython').get(),
+                        rootProject.file('../tools/clean_android_runtime.py').path,
+                        layout.buildDirectory.dir("python/pip/${variant.toLowerCase()}").get().asFile.path
+                }
+            }
+        }
+    }
+}

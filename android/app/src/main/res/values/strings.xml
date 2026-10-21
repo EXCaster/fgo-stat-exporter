@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FGO 抓包统计</string>
+    <string name="preparing">正在准备本机统计资源，首次启动请稍候…</string>
+    <string name="start_failed">启动未完成（%1$s）。请重新打开应用。</string>
+    <string name="webview_update">请更新系统 Android System WebView 或 Chrome 后重新打开应用。</string>
+    <string name="page_stopped">当前设备的页面进程已退出，请重新打开应用。较长报告可选择分段保存。</string>
+    <string name="exit_question">退出并清除本次登录和统计数据？</string>
+    <string name="exit_confirm">退出</string>
+    <string name="continue_use">继续使用</string>
+    <string name="gallery_saved">统计图片已保存到相册的“FGO抓包统计”中</string>
+</resources>

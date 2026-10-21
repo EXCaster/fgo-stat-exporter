@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+*.dpapi
+*.partial
+.env
+.gradle/
+local.properties
+*.jks
+*.keystore
+*.apk
+# 本机真实固定协议配置只保留在项目目录，不提交或随桌面包分发。
+game-protocol.json
+protocol.json
+*.exe
+# 本地开发工具说明与设置不进入源码仓库。
+AGENTS.md
+CLAUDE.md
+.codex/
+.cursor/
+.claude/

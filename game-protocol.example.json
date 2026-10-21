@@ -1,0 +1,14 @@
+{
+  "version": "2.129.0",
+  "sdk_base": {
+    "merchant_id": "1",
+    "game_id": "112",
+    "app_id": "112",
+    "server_id": "248",
+    "version": "3",
+    "sdk_type": "1"
+  },
+  "sdk_key": "<填写实际 SDK 密钥>",
+  "development_code": "<填写实际固定参数>",
+  "session_prefix": "<填写实际会话前缀>"
+}

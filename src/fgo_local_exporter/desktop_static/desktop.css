@@ -1,0 +1,25 @@
+.desktop-status{margin-bottom:28px;padding:26px 30px}
+.desktop-status .section-label{margin-bottom:20px}
+.desktop-status-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:30px}
+.desktop-status-title{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:20px}
+.desktop-status p{font-size:16px;line-height:1.7;margin:10px 0}
+.desktop-status .desktop-secondary{color:#5d7c8b;font-size:15px}
+.desktop-badge{font-size:15px;line-height:1.4;border:1px solid #c4dce5;background:#f0f7fa;padding:4px 11px;border-radius:16px;white-space:nowrap}
+.desktop-badge[data-state="ready"]{color:#24735b;background:#edf8f1;border-color:#b9dec9}
+.desktop-badge[data-state="busy"]{color:#246d97;background:#edf6ff;border-color:#aacfe9}
+.desktop-badge[data-state="error"]{color:#9b431f;background:#fff1e9;border-color:#e8c0a8}
+.desktop-resource-details{display:flex;gap:0 24px;flex-wrap:wrap;color:#567786}
+.desktop-resource-details p{margin:0 0 8px}
+.desktop-resource-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.desktop-progress-area{padding:12px 16px;background:#f1f8fb;border:1px solid #c4dce5;border-radius:6px;margin-top:10px}
+.desktop-progress-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;font-size:16px}
+.desktop-progress-area progress{width:100%;height:12px;margin-top:10px;accent-color:#337da1}
+.desktop-progress-area .desktop-secondary{overflow-wrap:anywhere;margin-bottom:0}
+.desktop-status .desktop-notice{color:#337da1;margin:18px 0 0}
+#desktop-open-folder,#desktop-documents{margin-top:14px;margin-right:10px}
+.notebook{padding-top:24px;margin-top:22px}.topbar{padding-top:20px;padding-bottom:20px}
+.disclaimer{margin-bottom:16px}.intro{display:none}.entry-card{min-height:0}
+
+.desktop-directory{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px;margin:14px 0;font-size:16px}
+.desktop-directory input{width:100%;box-sizing:border-box;min-width:0;font:inherit;color:#355d70;background:#f7fbfd;border:1px solid #c4dce5;border-radius:4px;padding:10px}
+#download-json{white-space:normal;text-align:center}

@@ -1,0 +1,19 @@
+<section class="card desktop-status" aria-labelledby="local-setup-title">
+  <div class="section-label"><span class="index">⌂</span><div><h2 id="local-setup-title">统计资源</h2><p>检查从者、礼装、卡池、关卡与名称更新</p></div></div>
+  <div class="desktop-status-grid">
+    <div>
+      <div class="desktop-status-title"><b>统计资源</b><span id="desktop-resource-state" class="desktop-badge">正在检查</span></div>
+      <p id="desktop-resources" role="status">正在读取内置字典和图片…</p>
+      <div class="desktop-resource-details"><p id="desktop-dictionary-meta">字典：正在确认</p><p id="desktop-images-meta">图片：正在确认</p></div>
+      <div id="desktop-progress-area" class="desktop-progress-area" aria-live="polite" hidden>
+        <div class="desktop-progress-heading"><strong id="desktop-progress-label">正在检查</strong><span id="desktop-progress-number">0 / 0</span></div>
+        <progress id="desktop-progress" max="1" value="0" aria-label="字典检查进度"></progress>
+        <p id="desktop-progress-detail" class="desktop-secondary"></p>
+      </div>
+      <div class="desktop-directory"><label for="desktop-dictionary-directory">字典保存位置</label><input id="desktop-dictionary-directory" readonly aria-label="字典保存位置" value="正在确认…"><button id="desktop-open-dictionary" class="button light" type="button" disabled>打开字典文件夹</button></div>
+      <div class="desktop-resource-actions"><button id="desktop-prepare" class="button outline" type="button">检查资源更新</button><button id="desktop-existing" class="button light" type="button">使用已有资源</button></div>
+    </div>
+  </div>
+  <p id="desktop-notice" role="status" class="desktop-notice">内置图片直接使用，新图片按需下载并在本机缓存。账号授权凭据与原始响应不保存。</p>
+  <button id="desktop-open-folder" class="button light" type="button" hidden>打开已保存文件所在文件夹</button>
+</section>
