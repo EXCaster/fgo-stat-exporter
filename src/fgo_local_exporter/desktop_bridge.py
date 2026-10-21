@@ -15,6 +15,7 @@ from PIL import Image
 
 from fgo_local_exporter import __version__
 from fgo_local_exporter.desktop_reports import DesktopReportBuilder
+from fgo_local_exporter.desktop_storage import StorageSettings, validate_data_directory
 from fgo_local_exporter.errors import ExportError
 from fgo_local_exporter.game_profile import default_profile_path, load_profile
 from fgo_local_exporter.local_files import local_directory_path
@@ -37,7 +38,7 @@ def _safe(method):
 
 
 class DesktopBridge:
-    def __init__(self, config, resources, *, profile_path=None):
+    def __init__(self, config, resources, *, profile_path=None, data_root=None, storage=None):
         self._config, self._resources = config, resources
         self._store = self._window = self._session = None
         self._lock = threading.RLock()
@@ -47,6 +48,9 @@ class DesktopBridge:
             Path(profile_path) if profile_path is not None else default_profile_path()
         )
         self._asset_root = None
+        self._data_root = Path(data_root) if data_root is not None else resources.root.parent
+        self._pending_data_root = None
+        self._storage = storage or StorageSettings()
 
     def _restore_profile(self):
         try:
@@ -84,6 +88,10 @@ class DesktopBridge:
                 else "",
                 "native_support": bool(self._config.native_ui_dir),
                 "can_open_folder": self._last_folder is not None,
+                "data_directory": str(self._data_root),
+                "pending_data_directory": str(self._pending_data_root)
+                if self._pending_data_root is not None
+                else "",
             }
 
     @_safe
@@ -109,6 +117,23 @@ class DesktopBridge:
         if not path.is_dir():
             raise ExportError("RESOURCE_NOT_READY")
         os.startfile(str(path))
+
+    @_safe
+    def choose_data_directory(self):
+        import webview
+
+        paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+        if not paths:
+            return {"changed": False}
+        path = validate_data_directory(paths if isinstance(paths, str) else paths[0])
+        self._storage.save(path)
+        with self._lock:
+            self._pending_data_root = path if path != self._data_root else None
+        return {"changed": True, "restart_required": self._pending_data_root is not None}
+
+    @_safe
+    def open_data_folder(self):
+        os.startfile(str(local_directory_path(self._data_root)))
 
     @_safe
     def open_documents(self):

@@ -4,6 +4,7 @@ import re
 import time
 
 import pytest
+from test_desktop_storage import MemorySettings
 
 from fgo_local_exporter.desktop import create_desktop_app
 from fgo_local_exporter.desktop_bridge import DesktopBridge
@@ -147,6 +148,39 @@ def test_dictionary_folder_is_visible_and_opened_without_accepting_a_path(tmp_pa
         assert bridge.status()["dictionary_directory"] == str(root / "data")
         assert bridge.open_dictionary_folder()["ok"]
         assert opened == [str(root / "data")]
+    finally:
+        app.extensions["local_store"].close()
+
+
+def test_changing_data_directory_waits_for_restart_and_preserves_current_files(tmp_path):
+    app, client, bridge, page, csrf = make_app(tmp_path)
+    original = tmp_path / "keep.txt"
+    original.write_text("existing data")
+    selected = tmp_path / "new-data"
+    bridge._storage = MemorySettings()
+
+    class Window:
+        result = (str(selected),)
+
+        def create_file_dialog(self, *_args, **_kwargs):
+            return self.result
+
+    bridge._window = Window()
+    try:
+        bridge.connect(csrf)
+        result = bridge.choose_data_directory()
+        assert result["ok"] and result["restart_required"]
+        assert bridge._storage.saved == [selected]
+        assert bridge.status()["data_directory"] == str(tmp_path)
+        assert bridge.status()["pending_data_directory"] == str(selected)
+        assert bridge._resources.root == tmp_path / "resources"
+        assert original.read_text() == "existing data"
+        bridge._window.result = None
+        assert bridge.choose_data_directory() == {"ok": True, "changed": False}
+        assert bridge.status()["pending_data_directory"] == str(selected)
+        bridge._window.result = (str(tmp_path),)
+        assert not bridge.choose_data_directory()["restart_required"]
+        assert bridge.status()["pending_data_directory"] == ""
     finally:
         app.extensions["local_store"].close()
 

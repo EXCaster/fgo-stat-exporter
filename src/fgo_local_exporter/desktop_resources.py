@@ -122,6 +122,15 @@ class ResourceManager:
             # 字典加载器的兼容性错误也不能让可用的内置资源失效。
             return None
 
+    def cache_existing(self, path):
+        """将内置字典写入所选数据目录，再保存启用版本。"""
+        root = self.use_existing(path)
+        if root.parent != self.root:
+            self._prepare(lambda _root: None, False)
+            if self.phase == "error":
+                raise ExportError(self.error)
+        return self.current
+
     def _read_manifest(self, root):
         groups = {}
         for group in ("data", "atlas-cn"):
@@ -298,7 +307,9 @@ class ResourceManager:
                 metadata["resource_version"] = manifest["version"]
                 self._write(
                     directory / "SOURCE_MANIFEST.json",
-                    json.dumps(metadata, ensure_ascii=False, sort_keys=True).encode(),
+                    (seed / group / "SOURCE_MANIFEST.json").read_bytes()
+                    if not update and seed is not None
+                    else json.dumps(metadata, ensure_ascii=False, sort_keys=True).encode(),
                 )
             with self.lock:
                 self.phase, self.current_file = "validating", "正在校验完整字典与上游版本"
@@ -314,7 +325,11 @@ class ResourceManager:
                 catalog.verify_current(self.client, self.stop)
             if self.stop.is_set():
                 raise ExportError("CANCELLED")
-            same = manifest["version"] == self.version and self.current is not None
+            same = (
+                manifest["version"] == self.version
+                and self.current is not None
+                and self.current.parent == self.root
+            )
             # 同一版本检查仍校验全部文件；文件损坏修复后才替换目录。
             if same:
                 try:

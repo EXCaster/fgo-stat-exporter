@@ -14,7 +14,12 @@ from werkzeug.serving import WSGIRequestHandler, make_server
 from fgo_local_exporter import __version__
 from fgo_local_exporter.desktop_bridge import DesktopBridge
 from fgo_local_exporter.desktop_reports import engine_source
-from fgo_local_exporter.desktop_resources import ResourceManager, local_data_root
+from fgo_local_exporter.desktop_resources import ResourceManager
+from fgo_local_exporter.desktop_storage import (
+    StorageSettings,
+    choose_startup_directory,
+    create_browser_directory,
+)
 from fgo_local_exporter.local_api import create_app
 from fgo_local_exporter.settings import LocalConfig
 
@@ -48,16 +53,21 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--resources", type=Path)
+    parser.add_argument("--data-dir", type=Path, help="指定字典、图片缓存和浏览器数据目录")
     parser.add_argument(
         "--protocol", type=Path, help="指定固定协议配置，默认读取 game-protocol.json"
     )
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    storage = StorageSettings()
+    data_root = choose_startup_directory(args.data_dir, settings=storage)
+    if data_root is None:
+        return
     source = engine_source()
     if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(source))
-    resources = ResourceManager()
+    resources = ResourceManager(data_root / "resources")
     server = None
     for _ in range(5):
         with socket.socket() as sock:
@@ -69,7 +79,9 @@ def main():
             max_sessions=4,
             memory_bytes=192 * 1024 * 1024,
         )
-        bridge = DesktopBridge(config, resources, profile_path=args.protocol)
+        bridge = DesktopBridge(
+            config, resources, profile_path=args.protocol, data_root=data_root, storage=storage
+        )
         app = create_desktop_app(config, bridge)
         try:
             server = make_server(
@@ -80,22 +92,21 @@ def main():
             bridge._store.close()
     if server is None:
         raise RuntimeError("LOCAL_PORT_UNAVAILABLE")
-    if args.resources:
-        bridge._attach_resources(resources.use_existing(args.resources))
-    else:
-        bundled = (
-            Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2])) / "report-resources"
-        )
-        if bundled.is_dir():
-            bridge._attach_resources(resources.use_existing(bundled))
+    bundled = args.resources or (
+        Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2])) / "report-resources"
+    )
+    if bundled.is_dir():
+        bridge._asset_root = bundled
     active = resources.restore_active()
     if active is not None:
         bridge._attach_resources(active)
+    elif bundled.is_dir():
+        bridge._attach_resources(resources.cache_existing(bundled))
     bridge._restore_profile()
     if resources.current is not None:
         resources.prepare(bridge._attach_resources)
     window = webview.create_window(
-        f"FGO 抓包统计 · 本机版 {__version__}",
+        f"FGO 抓包统计 {__version__}",
         config.origin,
         js_api=bridge,
         width=1280,
@@ -113,7 +124,7 @@ def main():
             gui="edgechromium",
             private_mode=True,
             debug=False,
-            storage_path=str(local_data_root() / "webview"),
+            storage_path=str(create_browser_directory(data_root)),
         )
     finally:
         resources.stop.set()

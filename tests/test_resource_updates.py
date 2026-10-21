@@ -256,6 +256,42 @@ def test_unchanged_check_reuses_all_files_without_replacing_active_version(resou
     assert set(upstream.requests) == {DATA + "version.json", INFO, EXTRA}
 
 
+def test_bundled_dictionary_is_cached_in_selected_directory_without_network(resources, tmp_path):
+    bundle, upstream = resources
+    (bundle.current / "assets").mkdir()
+    output = io.BytesIO()
+    Image.new("RGB", (8, 8), (240, 240, 240)).save(output, "PNG")
+    image = output.getvalue()
+    (bundle.current / "assets/hero-990006.png").write_bytes(image)
+    (bundle.current / "SEED_IMAGES_MANIFEST.json").write_bytes(
+        encoded({"hero-990006.png": hashlib.sha256(image).hexdigest()})
+    )
+    target = ResourceManager(tmp_path / "chosen-data/resources")
+
+    class Offline:
+        def get(self, *_args, **_kwargs):
+            pytest.fail("复制内置字典不应发起网络请求")
+
+    target.client = Offline()
+    active = target.cache_existing(bundle.current)
+    assert active.parent == target.root and active != bundle.current
+    assert target.state()["ready"]
+    for group in ("data", "atlas-cn"):
+        assert (active / group / "SOURCE_MANIFEST.json").read_bytes() == (
+            bundle.current / group / "SOURCE_MANIFEST.json"
+        ).read_bytes()
+        for spec in target.manifest["groups"][group]["files"]:
+            assert (active / group / spec["filename"]).read_bytes() == (
+                bundle.current / group / spec["filename"]
+            ).read_bytes()
+    assert ResourceManager(target.root).restore_active() == active
+    assert target.cache_existing(active) == active
+    cache = target.image_cache(bundle.current, active)
+    assert cache.is_relative_to(target.root)
+    assert (cache / "hero-990006.png").read_bytes() == image
+    assert upstream.requests == []
+
+
 @pytest.mark.parametrize("failure", ["network", "hash", "format", "race", "cancel"])
 def test_failed_update_preserves_active_files_pointer_and_builder(resources, failure):
     manager, upstream = resources

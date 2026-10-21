@@ -1,6 +1,6 @@
 # 安卓构建与使用
 
-应用在设备上运行 Python 和 WebView，扫码请求直达官方接口，字典和图片从公开源获取。没有统计网站地址或服务端依赖，不需要安装游戏、Root、代理、证书或 ADB。ADB 仅供开发安装和验收使用。
+应用使用 Python 和 WebView，登录请求直接发送到官方接口，字典和图片从公开数据源获取。不需要安装游戏、Root、代理或证书。
 
 ## 设备要求
 
@@ -8,13 +8,13 @@
 - Android System WebView 或 Chrome 83 以上，并支持 `WEB_MESSAGE_LISTENER`。旧版 WebView 会提示更新。
 - 系统文件选择器用于导入文件和保存 JSON。图片直接写入系统相册的“FGO抓包统计”，不选择目录。
 - Android 10 及以上保存相册不申请存储权限；Android 7–9 首次保存需要一次存储权限，拒绝时给出提示。程序不读取已有照片，不申请管理全部文件权限。
-- 当前构建包含 `arm64-v8a`、`x86_64`，不包含 32 位架构。最低系统版本不代表已在每款手机上验收。
+- 安装包包含 `arm64-v8a`、`x86_64`，不包含 32 位架构。测试环境和兼容范围见 [VALIDATION.md](VALIDATION.md)。
 
 ## 编译环境
 
-已验证的工具为 Python 3.13、JDK 17、Android SDK Platform 35 / Build Tools 35.0.0、NDK 28.2.13676358、CMake、Ninja、Rust stable。Gradle Wrapper 固定为 8.11.1，Android Gradle Plugin 8.9.2，Chaquopy 17.1.0。依赖版本在 `android/requirements.txt` 固定。
+构建使用 Python 3.13、JDK 17、Android SDK Platform 35 / Build Tools 35.0.0、NDK 28.2.13676358、CMake、Ninja、Rust stable。Gradle Wrapper 固定为 8.11.1，Android Gradle Plugin 8.9.2，Chaquopy 17.1.0。依赖版本在 `android/requirements.txt` 固定。
 
-先在项目根目录安装 Python 依赖，并设置实际工具位置。以下目录只是示例，不包含私人配置：
+先在项目根目录安装 Python 依赖，并设置实际工具位置。以下路径请按实际安装位置修改：
 
 ```powershell
 uv sync --extra desktop --group build --group dev
@@ -33,7 +33,7 @@ uv run python tools/build_android_codecs.py --ndk $ndkDirectory --work build\and
 
 ## 固定协议配置
 
-将根目录的 `game-protocol.example.json` 复制为 `game-protocol.json` 并填写实际参数。桌面和 APK 构建默认读取根目录这一份配置，文件已被 Git 忽略。APK 构建会将固定配置写入 `assets/game-protocol.json`，不将真实值写入代码。配置只能包含 `version`、`sdk_base`、`sdk_key`、`development_code`、`session_prefix`，不接受账号口令、Cookie、token 或登录 session。
+将根目录的 `game-protocol.example.json` 复制为 `game-protocol.json` 并填写实际参数。源码运行和 APK 构建默认读取这份配置，文件已加入 `.gitignore`。APK 构建会将固定配置写入 `assets/game-protocol.json`，不将真实值写入代码。配置只能包含 `version`、`sdk_base`、`sdk_key`、`development_code`、`session_prefix`，不接受账号口令、Cookie、token 或登录 session。
 
 没有配置仍能编译、导入文件和生成图片，但不能扫码取数。需要使用其他位置的 JSON 时传入 `--protocol 文件路径`。请勿把真实配置、构建暂存目录、签名文件或运行数据提交到仓库。
 
@@ -49,11 +49,11 @@ $pythonExecutable = (Resolve-Path .venv\Scripts\python.exe).Path
 .\android\gradlew.bat -p android assembleDebug "-PpreparedDir=$preparedDirectory" "-PbuildPython=$pythonExecutable" "-PwheelDir=$wheelDirectory"
 ```
 
-APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。开发工具、源码暂存目录、测试 APK 和构建日志都不是客户端交付物。
+调试 APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。发布时使用正式签名包。
 
 正式签名使用仓库外的密钥库，通过 `FGO_ANDROID_KEYSTORE`、`FGO_ANDROID_STORE_PASSWORD`、`FGO_ANDROID_KEY_ALIAS`、`FGO_ANDROID_KEY_PASSWORD` 环境变量输入，再运行 `assembleRelease`。密钥、口令和配置文件不得写入命令示例或提交；更换签名无法直接覆盖旧安装。
 
-正式分发前必须执行安装、导入、扫码取数、出图、系统文件保存和重新检查资源的实际验收。随后使用 `tools/review_android.py --apk 安装包路径 --prepared 暂存目录 --output 审核记录路径` 检查全部路径、嵌套归档、编译模块、资源载荷和原生库页对齐；该脚本拒绝依赖测试目录、开发源码和调试符号。`zipalign -c -P 16 4` 和 `apksigner verify` 分别检查压缩对齐与签名。审核记录和暂存目录不放进客户端包，不能以编译成功代替兼容性验收。
+发布前测试安装、文件导入、扫码取数、出图、文件保存和资源更新。使用 `tools/review_android.py --apk 安装包路径 --prepared 暂存目录 --output 审核记录路径` 检查全部路径、嵌套归档、编译模块、资源载荷和原生库页对齐；该脚本拒绝依赖测试目录、开发源码和调试符号。`zipalign -c -P 16 4` 和 `apksigner verify` 分别检查压缩对齐与签名。检查记录、构建暂存目录和日志不随安装包分发。
 
 ## 使用
 

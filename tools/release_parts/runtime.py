@@ -27,6 +27,7 @@ APP_MODULES = (
     "desktop_bridge",
     "desktop_reports",
     "desktop_resources",
+    "desktop_storage",
     "resource_catalog",
 )
 STATIC_FILES = (
