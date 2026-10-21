@@ -12,7 +12,8 @@
     DATA_DIRECTORY_REQUIRED:"请先点击“选择数据目录”，设置字典和图片缓存的保存位置。",
     DATA_DIRECTORY_BUSY:"正在选择目录或准备资源，请稍候。",
     DATA_DIRECTORY_UNAVAILABLE:"所选目录无法写入，请选择固定磁盘上的其他文件夹。",
-    DATA_SETTINGS_UNAVAILABLE:"无法记住数据目录，请检查 Windows 用户权限后重试。"
+    DATA_SETTINGS_UNAVAILABLE:"无法记住数据目录，请检查 Windows 用户权限后重试。",
+    BROWSER_UNAVAILABLE:"无法打开系统浏览器，请检查默认浏览器设置。"
   };
   let connected = false, updating = false, selectingDirectory = false;
   const storageRow = document.createElement("div");
@@ -56,6 +57,11 @@
     catch (error) { notice(error.message); }
   });
   function notice(text) { $("desktop-notice").textContent = text; }
+  $("source-repository").addEventListener("click", async event => {
+    event.preventDefault();
+    try { await command("open_repository"); }
+    catch (error) { notice(error.message); }
+  });
   function failed(value) {
     if (!value?.ok) throw new Error((explanations[value?.error] || "操作未完成") + ` (${value?.error || "LOCAL_OPERATION_FAILED"})`);
     return value;

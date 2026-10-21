@@ -9,9 +9,11 @@ FGO 国服账号统计工具，支持 Windows 和 Android。可以扫码登录�
 - **Windows**：Windows 10 / 11 64 位，需要 Microsoft Edge WebView2 Runtime。运行 `FGOStatDesktop.exe`，进入页面后点击“选择数据目录”，设置字典和图片缓存的保存位置，之后可以在界面更换。扫码前请完成下方配置。
 - **Android**：Android 7.0 及以上，支持 `arm64-v8a`、`x86_64`，不支持 32 位设备。需要支持 Web Message Listener 的 Android System WebView 或 Chrome。安装 APK 后运行。
 
-1. 选择角色所在的 iOS 或安卓区服。
+1. 区服默认选择 iOS，安卓角色请切换到安卓区服。
 2. 扫码登录，或选择“导入文件”。扫码时请核对官方客户端显示的授权应用为“命运-冠位指定”。
 3. 核对角色信息，选择是否显示助战编成、好友 ID，再生成统计图或保存 JSON。好友 ID 默认隐藏。
+
+页面右上角的“GitHub 仓库”可打开项目源码仓库，Windows 和 Android 均使用系统浏览器打开。
 
 Windows 可选择图片和 JSON 的保存位置。Android 图片直接保存到相册的“FGO抓包统计”，JSON 通过系统文件保存器保存。Android 7–9 首次保存图片需要存储权限，Android 10 及以上不需要。长图保存失败时可尝试分段保存。
 

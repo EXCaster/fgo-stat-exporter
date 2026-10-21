@@ -8,6 +8,7 @@ import re
 import secrets
 import sys
 import threading
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
 
@@ -209,6 +210,14 @@ class DesktopBridge:
         if not path.is_dir() or path.is_symlink():
             raise ExportError("DOCUMENTS_NOT_READY")
         os.startfile(str(path))
+
+    @_safe
+    def open_repository(self):
+        """只打开项目的固定仓库地址，外部页面不进入应用窗口。"""
+        if not webbrowser.open(
+            "https://github.com/ayamedog/fgo-stat-exporter", new=2, autoraise=True
+        ):
+            raise ExportError("BROWSER_UNAVAILABLE")
 
     def _attach_resources(self, root):
         if self._asset_root is None:

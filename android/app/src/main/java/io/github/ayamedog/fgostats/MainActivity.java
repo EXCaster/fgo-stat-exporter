@@ -19,6 +19,7 @@ import java.util.concurrent.*;
 /** 本机页面与安卓文件选择器之间的窄接口，不对外提供服务地址。 */
 public final class MainActivity extends Activity {
     private static final int OPEN_FILE = 10, SAVE_FILE = 11, GALLERY_PERMISSION = 12;
+    private static final String SOURCE_REPOSITORY = "https://github.com/ayamedog/fgo-stat-exporter";
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private WebView web;
     private PyObject runtime;
@@ -159,6 +160,9 @@ public final class MainActivity extends Activity {
                     response.put("id", id); post(reply, response); return;
                 }
                 case "prepare_resources": runtime.callAttr("prepare_resources"); break;
+                case "open_repository":
+                    if (args.length() != 0) throw new IllegalArgumentException();
+                    openRepository(id, reply); return;
                 case "save_json":
                     save(runtime.callAttr("export_json").toJava(byte[].class), "fgo-statistics.json", "application/json", id, reply); return;
                 case "save_image": {
@@ -272,6 +276,18 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (!isFinishing() && web != null && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER))
                 reply.postMessage(value.toString());
+        });
+    }
+    private void openRepository(String id, JavaScriptReplyProxy reply) {
+        runOnUiThread(() -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SOURCE_REPOSITORY)));
+                post(reply, new JSONObject().put("id", id).put("ok", true));
+            } catch (ActivityNotFoundException | SecurityException error) {
+                failed(reply, id, "BROWSER_UNAVAILABLE");
+            } catch (JSONException error) {
+                failed(reply, id, "LOCAL_OPERATION_FAILED");
+            }
         });
     }
     private void failed(JavaScriptReplyProxy reply, String id, String code) {
