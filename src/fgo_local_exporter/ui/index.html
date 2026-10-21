@@ -8,8 +8,10 @@
   <meta name="description" content="FGO 国服抓包统计，支持扫码、文件导入、数据导出和统计图片下载。">
   <title>FGO 抓包统计</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/gacha-records.css">
   <script src="/static/html-to-image.js" defer></script>
   <script src="/static/app.js" defer></script>
+  <script src="/static/gacha-records.js" defer></script>
   <script src="/static/resource-status.js" defer></script>
   <script src="/desktop.js" defer></script>
   <link rel="stylesheet" href="/desktop.css">
@@ -70,6 +72,24 @@
         </section>
       </div>
     </div>
+
+    <section class="card details-card" id="account-detail-card" aria-labelledby="details-title" hidden>
+      <div class="section-label"><span class="index">04</span><div><h2 id="details-title">卡池抽卡记录</h2><p>查看每个卡池的累计次数</p></div></div>
+      <div class="detail-tabs" role="group" aria-label="选择统计明细">
+        <button class="button outline" id="show-gachas" type="button" aria-pressed="false">查看卡池记录</button>
+      </div>
+      <div id="detail-browser" hidden>
+        <p class="detail-scope" id="detail-scope"></p>
+        <div class="detail-filters">
+          <label class="detail-search"><span>搜索</span><input id="detail-query" type="search" maxlength="100" autocomplete="off" placeholder="卡池名称或 ID"></label>
+          <label><span id="detail-kind-label">卡池类型</span><select id="detail-kind"></select></label>
+          <label><span>排序</span><select id="detail-sort"><option value="default">默认顺序</option><option value="pulls">抽数从多到少</option><option value="recent">开放时间从新到旧</option></select></label>
+        </div>
+        <p class="detail-status" id="detail-status" role="status" aria-live="polite"></p>
+        <div id="detail-list" class="detail-list"></div>
+        <div class="detail-pagination" id="detail-pagination" hidden><button class="button light" id="detail-prev" type="button">上一页</button><span id="detail-page"></span><button class="button light" id="detail-next" type="button">下一页</button></div>
+      </div>
+    </section>
 
     <section class="report-viewer" id="report-viewer" aria-labelledby="viewer-title" hidden>
       <div class="viewer-toolbar"><div><span class="eyebrow">统计结果</span><h2 id="viewer-title">FGO 抓包统计图</h2><p id="viewer-meta">图片由浏览器在你的设备上生成。</p></div><div class="viewer-actions"><button class="button primary" id="download-image" type="button">保存完整长图 ↧</button><details class="save-help"><summary>保存遇到问题？</summary><div><p>部分手机无法合成超长图片，可改为分段保存。</p><button class="button light" id="download-sections" type="button">分段保存</button></div></details></div></div>

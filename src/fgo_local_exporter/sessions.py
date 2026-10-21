@@ -53,6 +53,9 @@ class LocalSession(LoginSession):
         self.phase = "ready"
         self.source = ""
         self.document = None
+        self.details = None
+        self.details_bytes = 0
+        self.details_revision = ""
         self.report_version = ""
         self.report_phase, self.report_error = ("idle", "")
         self.report_progress = {}
@@ -64,12 +67,77 @@ class LocalSession(LoginSession):
             super().clear()
             self.report_cancel.set()
             self.document = None
+            self.details = None
+            self.details_bytes = 0
+            self.details_revision = ""
             self.report_version = ""
             self.report_phase, self.report_error = ("idle", "")
             self.report_progress = {}
             self.source = ""
             self.failure_phase = ""
             self.store.budget.set(self.identifier, 0)
+
+    def memory_size(self):
+        return (
+            len(self.export)
+            + self.details_bytes
+            + (self.document.byte_size if self.document else 0)
+        )
+
+    def gacha_history(self):
+        builder = self.store.builder
+        if builder is None:
+            raise ExportError("REPORT_NOT_CONFIGURED")
+        revision = builder.revision()
+        with self.lock:
+            self.state()
+            if not self.export or self.phase != "complete":
+                raise ExportError("STATISTICS_NOT_READY")
+            if self.details is not None and self.details_revision == revision:
+                return self.details, self.generation
+            raw, generation = self.export, self.generation
+        if not self.store.details_slots.acquire(blocking=False):
+            raise ExportError("LOCAL_BUSY")
+        try:
+            details = builder.gacha_history(raw)
+            with self.lock:
+                self.state()
+                if generation != self.generation or not self.export:
+                    raise ExportError("STATISTICS_NOT_READY")
+                if builder is not self.store.builder or revision != builder.revision():
+                    raise ExportError("REPORT_ENGINE_RESTART_REQUIRED")
+                count = details.byte_size
+                self.store.budget.set(
+                    self.identifier, self.memory_size() - self.details_bytes + count
+                )
+                self.details, self.details_bytes = details, count
+                self.details_revision = revision
+                return details, generation
+        finally:
+            self.store.details_slots.release()
+
+    def detail_image(self, generation, gacha_id):
+        details, current = self.gacha_history()
+        if generation != current:
+            raise ExportError("STATISTICS_NOT_READY")
+        if not self.store.image_slots.acquire(blocking=False):
+            raise ExportError("LOCAL_BUSY")
+        try:
+            builder = self.store.builder
+            if builder is None or self.details_revision != builder.revision():
+                raise ExportError("REPORT_ENGINE_RESTART_REQUIRED")
+            image = builder.gacha_image(details, gacha_id)
+            with self.lock:
+                self.state()
+                if (
+                    generation != self.generation
+                    or not self.export
+                    or builder is not self.store.builder
+                ):
+                    raise ExportError("STATISTICS_NOT_READY")
+            return image
+        finally:
+            self.store.image_slots.release()
 
     def state(self):
         with self.lock:
@@ -117,7 +185,7 @@ class LocalSession(LoginSession):
             with self.lock:
                 if self.generation == generation and self.phase == "complete":
                     try:
-                        self.store.budget.set(self.identifier, len(self.export))
+                        self.store.budget.set(self.identifier, self.memory_size())
                     except ExportError:
                         self.clear()
                         self.phase, self.error = ("error", "LOCAL_BUSY")
@@ -229,7 +297,7 @@ class LocalSession(LoginSession):
                 self.report_cancel = threading.Event()
                 self.report_version = ""
                 self.document = None
-                self.store.budget.set(self.identifier, len(self.export))
+                self.store.budget.set(self.identifier, self.memory_size())
                 self.report_phase, self.report_error = ("queued", "")
                 self.report_progress = {}
                 args = (self.export, options, self.generation, self.report_cancel)
@@ -261,7 +329,9 @@ class LocalSession(LoginSession):
                 self.state()
                 if cancel.is_set() or generation != self.generation:
                     return
-                self.store.budget.set(self.identifier, len(self.export) + document.byte_size)
+                self.store.budget.set(
+                    self.identifier, len(self.export) + self.details_bytes + document.byte_size
+                )
                 self.document = document
                 self.report_version = secrets.token_hex(12)
                 self.report_phase = "ready"
@@ -288,6 +358,8 @@ class LocalStore:
         self.qr_slots = threading.BoundedSemaphore(4)
         self.import_slots = threading.BoundedSemaphore(2)
         self.report_slot = threading.BoundedSemaphore(1)
+        self.details_slots = threading.BoundedSemaphore(2)
+        self.image_slots = threading.BoundedSemaphore(2)
         self.report_queue = threading.BoundedSemaphore(3)
         self.stop = threading.Event()
 

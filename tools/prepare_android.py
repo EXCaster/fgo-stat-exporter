@@ -37,6 +37,8 @@ DATA = (
     "ui/index.html",
     "ui/style.css",
     "ui/app.js",
+    "ui/gacha-records.js",
+    "ui/gacha-records.css",
     "ui/html-to-image.js",
     "ui/resource-status.js",
     "desktop_static/setup.html",

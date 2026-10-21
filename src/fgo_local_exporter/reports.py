@@ -7,6 +7,7 @@ import json
 import re
 import secrets
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,7 @@ class ReportBuilder:
         if importlib.util.find_spec("fgo_stat_core") is None:
             raise ExportError("REPORT_NOT_CONFIGURED")
         self._master = None
+        self._master_lock = threading.Lock()
         self._revision = self.revision()
 
     def revision(self):
@@ -75,6 +77,54 @@ class ReportBuilder:
         for directory in (self.config.data_dir, self.config.atlas_dir):
             digest.update((directory / "SOURCE_MANIFEST.json").read_bytes())
         return digest.hexdigest()[:16]
+
+    def master(self):
+        from fgo_stat_core.infrastructure.report_master import load_report_master
+
+        with self._master_lock:
+            if self._master is None:
+                self._master = load_report_master(self.config.data_dir, self.config.atlas_dir)
+            return self._master
+
+    def gacha_history(self, raw):
+        from fgo_stat_core.features.capture_import.parser import parse_capture
+        from fgo_stat_core.features.report.gacha_records import build_gacha_history
+
+        try:
+            if self.revision() != self._revision:
+                raise ExportError("REPORT_ENGINE_RESTART_REQUIRED")
+            snapshot = parse_capture(raw, secrets.token_bytes(32), report_fields=True)
+            return build_gacha_history(snapshot, self.master())
+        except ExportError:
+            raise
+        except Exception:
+            raise ExportError("DETAILS_DATA_INVALID") from None
+
+    def gacha_image(self, details, gacha_id):
+        from fgo_stat_core.infrastructure.public_download import PublicImageDownloader
+        from fgo_stat_core.infrastructure.report_assets import AssetSpec, fetch_report_assets
+
+        record = next((row for row in details.records if row.gacha_id == gacha_id), None)
+        if record is None or record.image_id is None:
+            raise ExportError("DETAILS_IMAGE_UNAVAILABLE")
+        name = f"banner-image-{record.image_id}.png"
+        spec = AssetSpec(
+            name,
+            f"https://static.atlasacademy.io/CN/SummonBanners/img_summon_{record.image_id}.png",
+        )
+
+        async def prepare():
+            async with asyncio.timeout(15), PublicImageDownloader(timeout=12) as source:
+                await fetch_report_assets((spec,), self.config.asset_dir, source)
+
+        try:
+            asyncio.run(prepare())
+            path = self.config.asset_dir / name
+            if path.is_symlink() or not path.is_file():
+                raise ExportError("DETAILS_IMAGE_UNAVAILABLE")
+            return path.read_bytes()
+        except Exception:
+            raise ExportError("DETAILS_IMAGE_UNAVAILABLE") from None
 
     def render(self, raw, options, cancelled, *, progress=None):
         def checkpoint(stage, completed=0, total=0):
@@ -92,18 +142,16 @@ class ReportBuilder:
             from fgo_stat_core.infrastructure.report_assets import (
                 plan_report_assets,
             )
-            from fgo_stat_core.infrastructure.report_master import load_report_master
             from fgo_stat_core.infrastructure.report_ui.builder import build
 
             if cancelled.is_set():
                 raise ExportError("CANCELLED")
             snapshot = parse_capture(raw, secrets.token_bytes(32), report_fields=True)
-            if self._master is None:
-                self._master = load_report_master(self.config.data_dir, self.config.atlas_dir)
+            master = self.master()
             checkpoint("calculating")
             report = build_report(
                 snapshot,
-                self._master,
+                master,
                 generated_at=int(time.time()),
                 show_friend_code=options["friend"],
                 show_support=options["support"],

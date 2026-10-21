@@ -21,6 +21,8 @@ _FILES = {
     "style.css": "text/css",
     "html-to-image.js": "text/javascript",
     "resource-status.js": "text/javascript",
+    "gacha-records.js": "text/javascript",
+    "gacha-records.css": "text/css",
 }
 
 
@@ -188,6 +190,42 @@ def create_app(
             if not g.visitor.svg:
                 return reply({"error": "QR_NOT_READY"}, 404)
             return Response(g.visitor.svg, content_type="image/svg+xml")
+
+    @app.get("/api/gachas")
+    def gacha_history():
+        from fgo_stat_core.contracts.models import CaptureError
+        from fgo_stat_core.features.report.gacha_records import gacha_page
+
+        if set(request.args) - {"q", "kind", "sort", "page"} or any(
+            len(request.args.getlist(key)) != 1 for key in request.args
+        ):
+            raise ExportError("DETAILS_QUERY_INVALID")
+        page = request.args.get("page", "1")
+        if not re.fullmatch(r"[1-9][0-9]{0,5}", page):
+            raise ExportError("DETAILS_QUERY_INVALID")
+        details, generation = g.visitor.gacha_history()
+        try:
+            value = gacha_page(
+                details,
+                query=request.args.get("q", ""),
+                kind=request.args.get("kind", "all"),
+                sort=request.args.get("sort", "default"),
+                page=int(page),
+            )
+        except CaptureError as error:
+            raise ExportError(error.code) from None
+        with g.visitor.lock:
+            g.visitor.state()
+            if generation != g.visitor.generation or not g.visitor.export:
+                raise ExportError("STATISTICS_NOT_READY")
+            return reply({**value, "generation": generation})
+
+    @app.get("/api/gachas/<int:gacha_id>/image")
+    def gacha_image(gacha_id):
+        generation = request.args.get("generation", "")
+        if set(request.args) != {"generation"} or not re.fullmatch(r"[0-9]{1,12}", generation):
+            raise ExportError("DETAILS_QUERY_INVALID")
+        return Response(g.visitor.detail_image(int(generation), gacha_id), content_type="image/png")
 
     @app.get("/api/export")
     def export():

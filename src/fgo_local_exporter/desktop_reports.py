@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sys
+import threading
 from pathlib import Path
 
 from fgo_local_exporter.reports import ReportBuilder, shared_report_revision
@@ -20,6 +21,7 @@ class DesktopReportBuilder(ReportBuilder):
     def __init__(self, config):
         self.config = config
         self._master = None
+        self._master_lock = threading.Lock()
         self._revision = self.revision()
 
     def revision(self):

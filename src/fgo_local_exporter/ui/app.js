@@ -149,6 +149,7 @@
       clearReport();
     }
     updateCountdown(); controls();
+    window.dispatchEvent(new CustomEvent("fgo-state", {detail:{ready:!!complete, generation:value.generation, engine:value.engine_revision || ""}}));
   }
   async function poll() {
     try { render(await api("/api/state")); }

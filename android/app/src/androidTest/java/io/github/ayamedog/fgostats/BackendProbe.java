@@ -8,9 +8,11 @@ import com.chaquo.python.android.AndroidPlatform;
 /** 在目标安卓解释器中运行人工数据检查，只返回错误类型和代码位置。 */
 public final class BackendProbe extends Instrumentation {
     private int inputPort;
+    private boolean gachaMode;
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         if (arguments != null) {
+            gachaMode = "gachas".equals(arguments.getString("mode", ""));
             try { inputPort = Integer.parseInt(arguments.getString("input_port", "0")); }
             catch (NumberFormatException ignored) { }
         }
@@ -37,9 +39,17 @@ public final class BackendProbe extends Instrumentation {
                 " if INPUT_PORT:\n" +
                 "  with urllib.request.urlopen('http://127.0.0.1:'+str(INPUT_PORT)+'/',timeout=10) as source:raw=source.read(16*1024*1024+1)\n" +
                 " started=time.monotonic()\n" +
-                " document=app._store.builder.render(raw,{'friend':False,'support':True},threading.Event())\n" +
+                " if GACHA_MODE:\n" +
+                "  from fgo_stat_core.features.report.gacha_records import gacha_page\n" +
+                "  history=app._store.builder.gacha_history(raw)\n" +
+                "  page=gacha_page(history)\n" +
+                "  assert history.available and page['total']==len(history.records)\n" +
+                "  assert len(page['rows'])<=30\n" +
+                "  result={'ok':True,'seconds':round(time.monotonic()-started,2),'records':len(history.records),'pages':page['pages'],'page_rows':len(page['rows'])}\n" +
+                " else:\n" +
+                "  document=app._store.builder.render(raw,{'friend':False,'support':True},threading.Event())\n" +
+                "  result={'ok':True,'seconds':round(time.monotonic()-started,2),'html_bytes':len(document.html),'assets':len(document.assets)}\n" +
                 " raw=None\n" +
-                " result={'ok':True,'seconds':round(time.monotonic()-started,2),'html_bytes':len(document.html),'assets':len(document.assets)}\n" +
                 " app.close()\n" +
                 "except BaseException as error:\n" +
                 " while error.__context__ is not None:error=error.__context__\n" +
@@ -58,6 +68,7 @@ public final class BackendProbe extends Instrumentation {
             com.chaquo.python.PyObject namespace = Python.getInstance().getBuiltins().callAttr("dict");
             namespace.callAttr("__setitem__", "ROOT", getTargetContext().getFilesDir().getPath());
             namespace.callAttr("__setitem__", "INPUT_PORT", inputPort);
+            namespace.callAttr("__setitem__", "GACHA_MODE", gachaMode);
             Python.getInstance().getBuiltins().callAttr("exec", script, namespace);
             result.putString("probe", namespace.callAttr("__getitem__", "RESULT").toString());
         } catch (Exception error) { result.putString("probe", "PROBE_FAILED:" + error.getClass().getSimpleName()); }
