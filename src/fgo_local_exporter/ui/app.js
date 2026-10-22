@@ -7,6 +7,8 @@
     LOCAL_BUSY: "当前任务较多，请稍后再试。",
     VISITOR_EXPIRED: "浏览器会话已过期，请刷新页面重新开始。",
     CONSENT_REQUIRED: "请先阅读并勾选数据处理说明。",
+    LOCAL_PROFILE_REQUIRED: "扫码配置缺失，请使用包含扫码配置的新版 Windows 程序；也可切换到“导入文件”。",
+    LOCAL_PROFILE_INVALID: "扫码配置未通过校验，请更新程序；使用自定义配置时请检查配置文件。仍可切换到“导入文件”。",
     SERVER_SELECTION_REQUIRED: "请先选择角色所在的 iOS 或安卓服务器。",
     INPUT_TOO_LARGE: "文件为空或超过 16 MB，请选择登录响应或已过滤的统计文件。",
     IMPORT_TIMEOUT: "文件解析超时，请使用本工具导出的 JSON，或检查文件是否完整。",
@@ -21,6 +23,7 @@
     REPORT_IMAGE_TIMEOUT: "图片下载超过一分钟，请检查网络后重新生成；已经下载的公开图片会保留。",
     REPORT_EXPIRED: "这份报告已清除或过期，请重新生成。",
     REPORT_IMAGE_MISSING: "部分统计图片尚未下载，请检查网络后重新生成。",
+    REPORT_IMAGES_PARTIAL: "部分公开图片暂不可用，统计内容已生成；助战图片不全时保留文字布局，稍后重新生成可补齐图片。",
     REPORT_BUILD_FAILED: "报告未能完成，请保留错误码供排查。统计 JSON 仍可单独下载。",
     REMOTE_REQUEST_FAILED: "暂时无法连接官方服务，请稍后重新生成二维码。",
     REMOTE_TLS_VERIFY_FAILED: "连接官方服务时未能通过证书校验，请核对系统时间后重试。",
@@ -32,7 +35,9 @@
   let mode = "qr", selectedFile = null, current = null, pending = false, qrGeneration = -1;
   let shownReport = "", imageBusy = false, blobUrls = [], frameHeight = 0;
   let countdownEndsAt = 0;
-  const describe = code => errors[code] || "本次操作未完成，请核对文件或重新尝试。排查时只需提供错误码。";
+  const describe = code => errors[code] || (/^STAT_FIELD_[A-Z0-9_]+$/.test(code) || code === "STATISTICS_FIELD_INVALID"
+    ? "统计字段格式暂不兼容，请提供下方完整错误码以便定位。"
+    : "本次操作未完成，请核对文件或重新尝试。排查时只需提供错误码。");
   const server = () => document.querySelector('input[name="server"]:checked')?.value || "";
   const size = bytes => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(2)} MB` : `${(bytes / 1024).toFixed(1)} KB`;
   const remaining = seconds => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -67,9 +72,10 @@
     const working = pending || (current && busy.has(current.phase));
     document.querySelectorAll('input[name="server"]').forEach(input => { input.disabled = !!working; });
     const ready = !!server() && $("consent").checked && (mode === "qr" || selectedFile);
-    $("start-button").disabled = !!working || !ready || (mode === "qr" && current?.qr_available === false);
+    const qrUnavailable = mode === "qr" && current?.qr_available === false;
+    $("start-button").disabled = !!working || !ready || qrUnavailable;
     $("start-label").textContent = pending ? "正在提交…" : working ? "正在处理…" : mode === "qr" ? (current?.phase === "expired" ? "重新生成二维码" : "生成二维码") : "读取统计文件";
-    $("field-hint").textContent = working ? "处理期间请保持此页面打开" : !server() ? "请先选择角色所在区服" : !$("consent").checked ? "请阅读并勾选数据处理说明" : mode === "file" && !selectedFile ? "请选择需要导入的文件" : "数据在本机内存中短时处理，完成后请及时保存";
+    $("field-hint").textContent = working ? "处理期间请保持此页面打开" : !server() ? "请先选择角色所在区服" : qrUnavailable ? describe(current.qr_error || "LOCAL_PROFILE_REQUIRED") : !$("consent").checked ? "请阅读并勾选数据处理说明" : mode === "file" && !selectedFile ? "请选择需要导入的文件" : "数据在本机内存中短时处理，完成后请及时保存";
     const reportWorking = ["queued", "building"].includes(current?.report_phase);
     $("build-report").disabled = pending || reportWorking || !current?.download_ready || !current?.report_available;
     $("build-report").textContent = reportWorking ? "正在生成统计图…" : current?.report_phase === "ready" ? "重新生成统计图 ↗" : "生成统计图 ↗";
@@ -139,6 +145,8 @@
     if (value.error) showError(value.error);
     $("report-error").hidden = !value.report_error;
     $("report-error").textContent = value.report_error ? `${describe(value.report_error)} (${value.report_error})` : "";
+    $("report-warning").hidden = !value.report_warning;
+    $("report-warning").textContent = value.report_warning ? describe(value.report_warning) : "";
     if (value.report_phase === "ready" && value.report_version && shownReport !== value.report_version) {
       discardImages();
       shownReport = value.report_version;

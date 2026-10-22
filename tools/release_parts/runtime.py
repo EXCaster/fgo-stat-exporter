@@ -3,11 +3,13 @@
 import hashlib
 import importlib.metadata
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from fgo_local_exporter.game_profile import load_profile, profile_values
 from fgo_local_exporter.reports import shared_report_revision
 
 APP_MODULES = (
@@ -122,7 +124,27 @@ RUNTIME_PACKAGES = (
 )
 
 
-def build_runtime(root, work, resources, documents):
+def desktop_build_profile(root, path=None):
+    """扫码版必须具备完整的五项应用参数，不允许静默生成仅能导入的 EXE。"""
+    profile = load_profile(Path(path) if path is not None else root / "game-protocol.json")
+    if profile is None:
+        raise RuntimeError("缺少扫码固定配置，已停止构建，避免发布无法扫码的 EXE")
+    return profile
+
+
+def stage_desktop_profile(work, profile):
+    """重新序列化白名单应用参数，不复制原配置及任何额外字段。"""
+    directory = work / "reviewed-runtime-config"
+    directory.mkdir()
+    path = directory / "game-protocol.json"
+    raw = json.dumps(profile_values(profile), separators=(",", ":")).encode("utf-8")
+    path.write_bytes(raw)
+    if {item.name for item in directory.iterdir()} != {path.name}:
+        raise RuntimeError("内置扫码参数目录超出白名单")
+    return path
+
+
+def build_runtime(root, work, resources, documents, *, profile):
     stage = work / "source"
     stage.mkdir(parents=True)
     selected = ["run_desktop.py"]
@@ -143,9 +165,14 @@ def build_runtime(root, work, resources, documents):
     actual = {path.relative_to(stage).as_posix() for path in stage.rglob("*") if path.is_file()}
     if actual != set(selected):
         raise RuntimeError("构建输入集合与白名单不符")
+    protocol = stage_desktop_profile(work, profile)
     revision = shared_report_revision(root / "src")
     manifest = work / "engine-manifest.json"
-    manifest.write_text(json.dumps({"revision": revision, "files": source_hashes}, indent=2))
+    manifest.write_text(json.dumps({
+        "revision": revision,
+        "files": source_hashes,
+        "protocol_sha256": hashlib.sha256(protocol.read_bytes()).hexdigest(),
+    }, indent=2))
     args = [
         sys.executable,
         "-m",
@@ -174,6 +201,8 @@ def build_runtime(root, work, resources, documents):
         str(resources) + ":report-resources",
         "--add-data",
         str(documents) + ":documents",
+        "--add-data",
+        str(protocol) + ":runtime-config",
     ]
     for name in STATIC_FILES:
         args += [
@@ -194,6 +223,7 @@ def build_runtime(root, work, resources, documents):
         "mypy",
         "ruff",
         "unittest",
+        "flask.testing",
         "doctest",
         "pydoc",
         "setuptools",
@@ -213,8 +243,19 @@ def build_runtime(root, work, resources, documents):
     ):
         args += ["--exclude-module", name]
     args += [str(stage / "run_desktop.py")]
+    environment = os.environ.copy()
+    windows = Path(os.environ.get("WINDIR", "C:/Windows"))
+    environment["PATH"] = os.pathsep.join(str(path) for path in (
+        Path(sys.executable).parent, Path(sys.base_prefix), Path(sys.base_prefix) / "DLLs",
+        windows / "System32", windows,
+    ))
+    environment["PYTHONPATH"] = str(stage / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment.pop("PYTHONHOME", None)
     with (work / "build.log").open("wb") as output:
-        result = subprocess.run(args, stdout=output, stderr=subprocess.STDOUT, cwd=stage)
+        result = subprocess.run(
+            args, stdout=output, stderr=subprocess.STDOUT, cwd=stage, env=environment
+        )
     if result.returncode:
         raise RuntimeError("程序编译失败，请查看构建日志")
     return work / "binary/FGOStatDesktop.exe", source_hashes

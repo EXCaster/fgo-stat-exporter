@@ -97,15 +97,16 @@ def test_domestic_fallback_reuses_connection_without_cookies(monkeypatch):
             )
 
     asyncio.run(run())
-    assert len(clients) == 1 and len(requests) == 3
+    assert len(clients) == 1 and len(requests) == 2
     assert requests[-1].url.host == "static.atlas.chaldea.center"
     assert all("Cookie" not in request.headers for request in requests)
 
 
-def test_report_batch_timeout_cancels_downloads(monkeypatch, tmp_path):
+def test_report_batch_timeout_cancels_downloads_and_keeps_statistics_available(
+    monkeypatch, tmp_path
+):
     import threading
 
-    from fgo_local_exporter.errors import ExportError
     from fgo_local_exporter.reports import _prepare_images
     from fgo_stat_core.infrastructure.report_assets import AssetSpec
 
@@ -123,10 +124,10 @@ def test_report_batch_timeout_cancels_downloads(monkeypatch, tmp_path):
         AssetSpec(f"image-{i}.png", f"https://static.atlasacademy.io/CN/Items/{i}.png")
         for i in range(12)
     )
-    with pytest.raises(ExportError, match="REPORT_IMAGE_TIMEOUT"):
-        asyncio.run(
-            _prepare_images(specs, tmp_path, threading.Event(), lambda *_: None, timeout=0.03)
-        )
+    result = asyncio.run(
+        _prepare_images(specs, tmp_path, threading.Event(), lambda *_: None, timeout=0.03)
+    )
+    assert result == {"available": 0, "missing": 12, "downloaded": 0}
     assert not active
     assert not list(tmp_path.iterdir())
 
@@ -190,3 +191,157 @@ def test_image_progress_counts_existing_and_downloaded_images(monkeypatch, tmp_p
     assert requests == [specs[1].url]
     assert result == {"available": 2, "missing": 0, "downloaded": 1}
     assert progress == [("images", 1, 2), ("images", 2, 2)]
+
+
+def test_each_image_can_switch_source_without_waiting_for_another_image(monkeypatch):
+    events = []
+    image = b"\x89PNG\r\n\x1a\nartificial"
+
+    async def read(_self, url):
+        events.append(url)
+        if url.endswith("/slow.png"):
+            await asyncio.sleep(10)
+        return image
+
+    monkeypatch.setattr(PublicImageDownloader, "_read", read)
+
+    async def run():
+        source = PublicImageDownloader(timeout=0.05)
+        slow = asyncio.create_task(source.fetch("https://static.atlasacademy.io/CN/Items/slow.png"))
+        await asyncio.sleep(0)
+        fast = await source.fetch("https://static.atlasacademy.io/CN/Items/fast.png")
+        assert fast == image
+        with pytest.raises(CaptureError):
+            await slow
+
+    asyncio.run(run())
+    assert any(url.endswith("/fast.png") for url in events)
+
+
+@pytest.mark.parametrize("broken", ["stamp", "image", "url", "interrupted"])
+def test_repair_cache_downloads_again_instead_of_permanent_failure(tmp_path, broken):
+    import hashlib
+    import io
+
+    from PIL import Image
+
+    from fgo_stat_core.infrastructure.report_assets import AssetSpec, fetch_report_assets
+
+    output = io.BytesIO()
+    Image.new("RGBA", (8, 8), (1, 2, 3, 0)).save(output, "PNG")
+    image = output.getvalue()
+    spec = AssetSpec("narrow-990001.png", "https://static.atlasacademy.io/CN/Narrow/990001.png")
+    marker = hashlib.sha256(spec.url.encode()).hexdigest() + ":" + hashlib.sha256(image).hexdigest()
+    (tmp_path / spec.filename).write_bytes(b"broken" if broken == "image" else image)
+    if broken != "interrupted":
+        saved = "wrong" if broken == "stamp" else marker
+        if broken == "url":
+            saved = "0" * 64 + marker[64:]
+        (tmp_path / (spec.filename + ".sha256")).write_text(saved)
+    calls = []
+
+    class Downloader:
+        async def fetch(self, url):
+            calls.append(url)
+            return image
+
+    result = asyncio.run(fetch_report_assets((spec,), tmp_path, Downloader(), repair_cache=True))
+    assert result == {"available": 1, "missing": 0, "downloaded": 1}
+    assert calls == [spec.url]
+    assert (tmp_path / spec.filename).read_bytes() == image
+    assert (tmp_path / (spec.filename + ".sha256")).read_text() == marker
+    assert {p.name for p in tmp_path.iterdir()} == {spec.filename, spec.filename + ".sha256"}
+
+
+def test_missing_images_keep_the_fixed_layout_without_external_requests(tmp_path):
+    from fgo_local_exporter.reports import _missing_image_tags
+
+    source = '<img class="ring-symbol" style="left:20px" src="assets/class-1.png" alt="职阶">'
+    output, count = _missing_image_tags(source, tmp_path)
+    assert count == 1 and 'class="image-missing ring-symbol"' in output
+    assert 'style="left:20px"' in output and "图片未下载" in output
+    assert "src=" not in output and "http" not in output
+
+
+def test_report_still_contains_statistics_when_public_images_are_unavailable(
+    tmp_path, monkeypatch, minimal_capture, encode_capture, hmac_key
+):
+    import threading
+    from types import SimpleNamespace
+
+    from fgo_local_exporter.reports import ReportBuilder
+    from fgo_stat_core.contracts.report import Metric, SupportGroup, SupportSlot
+    from fgo_stat_core.features.capture_import.parser import parse_capture
+    from fgo_stat_core.features.report.calculator import build_report
+    from fgo_stat_core.infrastructure import report_assets
+
+    raw = encode_capture(minimal_capture)
+    report = build_report(
+        parse_capture(raw, hmac_key, report_fields=True), None, generated_at=1800000000
+    )
+    positions = (
+        "all",
+        "saber",
+        "archer",
+        "lancer",
+        "rider",
+        "caster",
+        "assassin",
+        "berserker",
+        "extra",
+    )
+    slots = (
+        SupportSlot(
+            position="all",
+            state="ready",
+            servant_id=990001,
+            name="人工助战",
+            level=80,
+            np_level=1,
+            skill_levels=(1, 1, 1),
+        ),
+    ) + tuple(SupportSlot(position=position, state="empty") for position in positions[1:])
+    report = report.model_copy(
+        update={
+            "supports": Metric(
+                state="ready",
+                value=(SupportGroup(kind="normal", index=1, slots=slots),),
+                rule_id="artificial",
+                source_tables=("userSupportDeck",),
+            )
+        }
+    )
+    import fgo_stat_core.features.report.calculator as calculator
+    import fgo_stat_core.infrastructure.native_support_render as native
+
+    monkeypatch.setattr(calculator, "build_report", lambda *_args, **_kwargs: report)
+    monkeypatch.setattr(
+        report_assets,
+        "plan_report_assets",
+        lambda *_args, **_kwargs: report_assets._plan(report, {}, {}, {}),
+    )
+
+    async def offline(_self, _url):
+        raise CaptureError("REPORT_IMAGE_DOWNLOAD_FAILED")
+
+    def no_native(*_args, **_kwargs):
+        pytest.fail("缺少助战图片时应保留标准布局")
+
+    monkeypatch.setattr(PublicImageDownloader, "fetch", offline)
+    monkeypatch.setattr(native, "render_native_blocks", no_native)
+    builder = ReportBuilder.__new__(ReportBuilder)
+    builder._revision = "artificial"
+    builder.revision = lambda: "artificial"
+    builder.master = lambda: None
+    builder.config = SimpleNamespace(
+        asset_dir=tmp_path,
+        data_dir=tmp_path,
+        native_ui_dir=tmp_path,
+        header_font=None,
+        regular_font=None,
+    )
+    document = builder.render(raw, {"friend": False, "support": True}, threading.Event())
+    assert document.image_warning == "REPORT_IMAGES_PARTIAL"
+    assert "人工助战" in document.html and "80" in document.html
+    assert document.data["supports"]["value"][0]["slots"][0]["level"] == 80
+    assert 'src="assets/' not in document.html and 'src="http' not in document.html

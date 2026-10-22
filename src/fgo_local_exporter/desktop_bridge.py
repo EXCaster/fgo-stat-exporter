@@ -19,7 +19,7 @@ from fgo_local_exporter.desktop_reports import DesktopReportBuilder
 from fgo_local_exporter.desktop_resources import ResourceManager
 from fgo_local_exporter.desktop_storage import StorageSettings, validate_data_directory
 from fgo_local_exporter.errors import ExportError
-from fgo_local_exporter.game_profile import default_profile_path, load_profile
+from fgo_local_exporter.game_profile import load_desktop_profile
 from fgo_local_exporter.local_files import local_directory_path
 
 __all__ = ["DesktopBridge"]
@@ -46,14 +46,14 @@ class DesktopBridge:
         self._lock = threading.RLock()
         self._game_phase, self._game_error = "idle", ""
         self._last_folder = None
-        self._profile_path = (
-            Path(profile_path) if profile_path is not None else default_profile_path()
-        )
+        self._profile_path = Path(profile_path) if profile_path is not None else None
         self._asset_root = None
         self._data_root = (
             Path(data_root)
             if data_root is not None
-            else resources.root.parent if resources is not None else None
+            else resources.root.parent
+            if resources is not None
+            else None
         )
         self._pending_data_root = None
         self._storage = storage or StorageSettings()
@@ -65,11 +65,13 @@ class DesktopBridge:
         with self._lock:
             self._initializing_resources = True
         try:
-            active = resources.restore_active()
+            active = (
+                resources.restore_for_startup(self._asset_root)
+                if self._asset_root is not None
+                else resources.restore_active()
+            )
             if active is not None:
                 self._attach_resources(active)
-            elif self._asset_root is not None:
-                self._attach_resources(resources.cache_existing(self._asset_root))
             resources.prepare(self._attach_resources)
         except Exception as error:
             with resources.lock:
@@ -90,13 +92,14 @@ class DesktopBridge:
             return self._resources
 
     def _restore_profile(self):
+        self._store.profile = None
         try:
-            profile = load_profile(self._profile_path)
-            if profile is not None:
-                self._store.profile = profile
-                self._game_phase = "ready"
+            self._store.profile = load_desktop_profile(self._profile_path)
+            self._game_phase = "ready" if self._store.profile is not None else "missing"
+            self._game_error = "" if self._store.profile is not None else "LOCAL_PROFILE_REQUIRED"
         except ExportError as error:
             self._game_phase, self._game_error = "error", error.code
+        self._store.profile_error = self._game_error
 
     @_safe
     def connect(self, csrf):

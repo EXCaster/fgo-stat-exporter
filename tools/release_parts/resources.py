@@ -23,14 +23,14 @@ def prepared_resources(root=None):
     if root is not None:
         return Path(root).resolve(strict=True)
     manager = ResourceManager()
-    result = manager.restore_active()
-    if result is None:
-        manager.prepare(lambda path: None)
-        while manager._thread.is_alive():
-            manager._thread.join(0.2)
-        if not manager.state()["ready"]:
-            raise RuntimeError(manager.state()["error"]) from None
-        result = manager.current
+    manager.restore_active()
+    # 默认打包必须检查完整最新目录，不能把旧缓存直接当作发布字典。
+    manager.prepare(lambda path: None, update=True)
+    while manager._thread.is_alive():
+        manager._thread.join(0.2)
+    if not manager.state()["ready"] or manager.state()["phase"] != "ready":
+        raise RuntimeError(manager.state()["error"]) from None
+    result = manager.current
     # 默认构建只准备通用图标，不用真实账号规划图片集合。
     raw = json.dumps(
         {

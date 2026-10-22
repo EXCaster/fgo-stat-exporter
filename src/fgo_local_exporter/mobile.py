@@ -68,7 +68,9 @@ class MobileRuntime:
             from fgo_local_exporter.game_profile import checked_profile
 
             self._store.profile = checked_profile(json.loads(profile))
-        self._attach_resources(self._resources.restore_active() or self._bundle)
+        self._attach_resources(
+            self._resources.restore_for_startup(self._bundle, cache_bundle=False)
+        )
 
         @app.get("/desktop.js")
         def javascript():

@@ -131,6 +131,33 @@ class ResourceManager:
                 raise ExportError(self.error)
         return self.current
 
+    @staticmethod
+    def _source_timestamps(root, manifest):
+        version = json.loads((root / "data/version.json").read_bytes())
+        timestamps = (
+            version.get("timestamp"),
+            manifest["groups"]["atlas-cn"]["atlas_info"].get("timestamp"),
+        )
+        if any(type(value) is not int or not 0 < value < 32_503_680_000 for value in timestamps):
+            raise ExportError("RESOURCE_MANIFEST_INVALID")
+        return timestamps
+
+    def restore_for_startup(self, bundle, *, cache_bundle=True):
+        """新版内置字典比缓存完整且更新时直接启用，不等待联网检查。"""
+        bundle = Path(bundle).resolve(strict=True)
+        bundled_manifest = self._read_manifest(bundle)
+        bundled_stamp = self._source_timestamps(bundle, bundled_manifest)
+        active = self.restore_active()
+        if active is not None:
+            active_stamp = self._source_timestamps(active, self.manifest)
+            # 两个源都不旧才替换，避免旧安装包覆盖已在线更新的字典。
+            if not (
+                all(new >= old for new, old in zip(bundled_stamp, active_stamp, strict=True))
+                and bundled_stamp != active_stamp
+            ):
+                return active
+        return self.cache_existing(bundle) if cache_bundle else self.use_existing(bundle)
+
     def _read_manifest(self, root):
         groups = {}
         for group in ("data", "atlas-cn"):
@@ -158,7 +185,7 @@ class ResourceManager:
         if not version:
             revision = data.get("data_commit", "")
             info = groups["atlas-cn"].get("atlas_info", {})
-            version = f"cn-bundled-{revision[:10]}-{info.get('dataVer', 0)}"
+            version = f"cn-bundled-{revision[:10]}-{info.get('hash', '')}-{info.get('dataVer', 0)}"
         if not isinstance(version, str) or not re.fullmatch(r"cn-[a-z0-9-]{1,120}", version):
             raise ExportError("RESOURCE_MANIFEST_INVALID")
         return {"version": version, "groups": groups}
@@ -179,21 +206,11 @@ class ResourceManager:
     def image_cache(self, bundle, dictionary=None):
         """将包内核验过的公开图片放入持久缓存，后续只下载缺少的图片。"""
         marker = bundle / "SEED_IMAGES_MANIFEST.json"
-        dictionary = dictionary or bundle
-        signature = hashlib.sha256()
-        same_version = True
-        for group in ("data", "atlas-cn"):
-            raw = (dictionary / group / "SOURCE_MANIFEST.json").read_bytes()
-            signature.update(raw)
-            same_version &= raw == (bundle / group / "SOURCE_MANIFEST.json").read_bytes()
-        cache = self.root / "images" / signature.hexdigest()[:24]
+        # 图片按各自来源地址和内容摘要校验，不因名称字典更新重新下载整批图片。
+        cache = self.root / "images" / "public-v2"
         cache.mkdir(parents=True, exist_ok=True)
         if cache.is_symlink():
             raise ExportError("RESOURCE_PATH_INVALID")
-        if not same_version:
-            # 新版首次出图重新请求所需公开图片，避免相同图片地址缓存旧内容。
-            # 游戏纹理和字体仍使用内置资源，不从游戏或 APK 重读。
-            return cache
         if not marker.is_file():
             # 开发时可直接使用调用者明确选择的既有资源目录。
             existing = bundle / "assets"
@@ -218,9 +235,8 @@ class ResourceManager:
             raw = source.read_bytes()
             if hashlib.sha256(raw).hexdigest() != digest:
                 raise ExportError("RESOURCE_HASH_MISMATCH")
-            if target.is_file() and target.stat().st_size == len(raw):
-                if hashlib.sha256(target.read_bytes()).hexdigest() == digest:
-                    continue
+            if target.is_file():
+                continue
             self._write(target, raw)
         return cache
 

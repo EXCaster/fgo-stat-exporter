@@ -53,6 +53,81 @@ def test_portable_executable_uses_its_own_directory(tmp_path, monkeypatch):
     assert game_profile.default_profile_path() == tmp_path / "game-protocol.json"
 
 
+@pytest.fixture
+def bundled_desktop(tmp_path, monkeypatch, config_value):
+    directory = tmp_path / "unpacked/runtime-config"
+    directory.mkdir(parents=True)
+    (directory / "game-protocol.json").write_text(json.dumps(config_value), encoding="utf-8")
+    standalone = tmp_path / "standalone"
+    standalone.mkdir()
+    monkeypatch.chdir(standalone)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(directory.parent), raising=False)
+    monkeypatch.setattr(sys, "executable", str(standalone / "FGOStatDesktop.exe"))
+    return directory / "game-protocol.json"
+
+
+def test_standalone_desktop_loads_bundled_profile_before_first_page(
+    tmp_path, bundled_desktop, config_value
+):
+    config = LocalConfig(origin="http://127.0.0.1:55313")
+    bridge = DesktopBridge(config, None)
+    app = create_desktop_app(config, bridge)
+    try:
+        client = app.test_client()
+        client.get("/", base_url=config.origin)
+        state = client.get("/api/state", base_url=config.origin).json
+        assert state["qr_available"] and state["can_start"]
+        assert state["qr_error"] == ""
+        assert bridge.status()["game_phase"] == "ready"
+        assert game_profile.profile_values(bridge._store.profile) == config_value
+        exposed = json.dumps(state) + json.dumps(bridge.status())
+        for key in ("sdk_key", "development_code", "session_prefix"):
+            assert config_value[key] not in exposed
+        for url in ("/runtime-config/game-protocol.json", "/static/game-protocol.json"):
+            assert client.get(url, base_url=config.origin).status_code == 404
+    finally:
+        app.extensions["local_store"].close()
+
+
+def test_explicit_profile_overrides_bundle(tmp_path, bundled_desktop, config_value):
+    selected = tmp_path / "custom.json"
+    config_value["session_prefix"] = "SyntheticExplicitPrefix123456"
+    selected.write_text(json.dumps(config_value), encoding="utf-8")
+    assert game_profile.profile_values(game_profile.load_desktop_profile(selected)) == config_value
+    with pytest.raises(ExportError, match="^LOCAL_PROFILE_REQUIRED$"):
+        game_profile.load_desktop_profile(tmp_path / "missing.json")
+    selected.write_text("synthetic-invalid-config", encoding="utf-8")
+    with pytest.raises(ExportError, match="^LOCAL_PROFILE_INVALID$"):
+        game_profile.load_desktop_profile(selected)
+
+
+def test_invalid_bundle_does_not_fall_back_to_external_profile(
+    bundled_desktop, config_value
+):
+    config_value["cookie"] = "SYNTHETIC_ACCOUNT_VALUE"
+    bundled_desktop.write_text(json.dumps(config_value), encoding="utf-8")
+    with pytest.raises(ExportError, match="^LOCAL_PROFILE_INVALID$"):
+        game_profile.load_desktop_profile()
+
+
+def test_desktop_build_requires_a_checked_profile(tmp_path, monkeypatch, config_value):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "tools"))
+    runtime = importlib.import_module("release_parts.runtime")
+    with pytest.raises(RuntimeError, match="缺少扫码固定配置"):
+        runtime.desktop_build_profile(tmp_path)
+    path = tmp_path / "game-protocol.json"
+    path.write_text(json.dumps(config_value), encoding="utf-8")
+    profile = runtime.desktop_build_profile(tmp_path)
+    staged = runtime.stage_desktop_profile(tmp_path, profile)
+    assert json.loads(staged.read_bytes()) == config_value
+    assert list(staged.parent.iterdir()) == [staged]
+    config_value["access_key"] = "SYNTHETIC_ACCOUNT_VALUE"
+    path.write_text(json.dumps(config_value), encoding="utf-8")
+    with pytest.raises(ExportError, match="^LOCAL_PROFILE_INVALID$"):
+        runtime.desktop_build_profile(tmp_path)
+
+
 def test_missing_configuration_does_not_disable_file_import(tmp_path):
     assert game_profile.load_profile(tmp_path / "game-protocol.json") is None
 

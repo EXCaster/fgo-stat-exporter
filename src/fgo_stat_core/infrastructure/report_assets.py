@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -205,7 +206,11 @@ def _validate_png(data: bytes, transparent: bool) -> None:
 
 
 async def fetch_report_assets(
-    specs: tuple[AssetSpec, ...], cache_dir: Path, downloader: ImageDownloader | None = None
+    specs: tuple[AssetSpec, ...],
+    cache_dir: Path,
+    downloader: ImageDownloader | None = None,
+    *,
+    repair_cache: bool = False,
 ) -> dict[str, int]:
     """有界下载公开素材到独立缓存；失败缺图不冒充其他角色。返回计数。"""
     if len(specs) > 256 or len({v.filename for v in specs}) != len(specs):
@@ -224,8 +229,8 @@ async def fetch_report_assets(
             if path.is_symlink() or stamp.is_symlink():
                 raise CaptureError("REPORT_ASSET_PATH_INVALID")
             existing = path.exists()
-            try:
-                if existing:
+            if existing or stamp.exists():
+                try:
                     if path.stat().st_size > _MAX_IMAGE_BYTES or stamp.stat().st_size > 256:
                         raise CaptureError("REPORT_IMAGE_INVALID")
                     raw = path.read_bytes()
@@ -237,6 +242,17 @@ async def fetch_report_assets(
                     if stamp.read_text() != expected:
                         raise CaptureError("REPORT_ASSET_CACHE_MISMATCH")
                     _validate_png(raw, spec.transparent)
+                except (CaptureError, OSError, UnicodeError):
+                    if not repair_cache:
+                        raise CaptureError("REPORT_ASSET_CACHE_INVALID") from None
+                    # 仅清理本次固定素材名，地址变化或中断下载都可重新修复。
+                    path.unlink(missing_ok=True)
+                    stamp.unlink(missing_ok=True)
+                    existing = False
+            try:
+                if existing:
+                    counts["available"] += 1
+                    return
                 else:
                     raw = await fetcher.fetch(spec.url)
                     _validate_png(raw, spec.transparent)
@@ -245,10 +261,18 @@ async def fetch_report_assets(
                         + ":"
                         + hashlib.sha256(raw).hexdigest()
                     )
-                    for target, payload in ((path, raw), (stamp, marker.encode())):
-                        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                        with os.fdopen(fd, "wb") as handle:
-                            handle.write(payload)
+                    temporary = []
+                    try:
+                        for target, payload in ((path, raw), (stamp, marker.encode())):
+                            with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False) as handle:
+                                partial = Path(handle.name)
+                                temporary.append((partial, target))
+                                handle.write(payload)
+                        for partial, target in temporary:
+                            os.replace(partial, target)
+                    finally:
+                        for partial, _ in temporary:
+                            partial.unlink(missing_ok=True)
                     counts["downloaded"] += 1
                 counts["available"] += 1
             except (CaptureError, OSError):

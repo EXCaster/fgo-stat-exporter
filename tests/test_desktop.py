@@ -114,6 +114,30 @@ def test_window_bridge_does_not_expose_internal_objects_or_keys(tmp_path):
         app.extensions["local_store"].close()
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+def test_ready_resources_show_missing_or_invalid_scan_profile(tmp_path, invalid):
+    if invalid:
+        (tmp_path / "game-protocol.json").write_text("synthetic-invalid", encoding="utf-8")
+    app, client, bridge, page, csrf = make_app(tmp_path)
+    bridge._resources.current = tmp_path / "resources/current"
+    try:
+        assert bridge.status()["resources"]["ready"]
+        expected = "LOCAL_PROFILE_INVALID" if invalid else "LOCAL_PROFILE_REQUIRED"
+        assert bridge.status()["game_error"] == expected
+        state = client.get("/api/state").json
+        assert not state["qr_available"]
+        assert state["qr_error"] == expected
+        assert state["can_import"]
+        response = client.post(
+            "/api/start", json={"server": "ios", "consent": True},
+            headers={"Origin": bridge._config.origin, "X-FGO-CSRF": csrf},
+        )
+        assert response.status_code == 409
+        assert response.json == {"error": expected}
+    finally:
+        app.extensions["local_store"].close()
+
+
 def test_json_saved_only_after_explicit_local_save_dialog(tmp_path):
     app, client, bridge, page, csrf = make_app(tmp_path)
     try:
@@ -296,7 +320,7 @@ def test_first_start_opens_window_without_selecting_or_preparing_resources(tmp_p
     monkeypatch.setattr(sys, "argv", ["FGOStatDesktop.exe"])
     monkeypatch.setattr("fgo_local_exporter.desktop.StorageSettings", MemorySettings)
     monkeypatch.setattr(
-        "fgo_local_exporter.desktop_bridge.default_profile_path",
+        "fgo_local_exporter.game_profile.default_profile_path",
         lambda: tmp_path / "game-protocol.json",
     )
     monkeypatch.setattr("fgo_local_exporter.desktop_storage.tempfile.tempdir", str(tmp_path))

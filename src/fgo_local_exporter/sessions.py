@@ -151,9 +151,11 @@ class LocalSession(LoginSession):
                     "source": self.source,
                     "can_import": self.phase not in _BUSY,
                     "qr_available": self.profile is not None,
+                    "qr_error": "" if self.profile is not None else self.store.profile_error,
                     "report_available": self.store.builder is not None,
                     "report_phase": self.report_phase,
                     "report_error": self.report_error,
+                    "report_warning": self.document.image_warning if self.document else "",
                     "report_progress": dict(self.report_progress),
                     "report_version": self.report_version,
                     "report_revision": self.document.revision if self.document else "",
@@ -169,6 +171,8 @@ class LocalSession(LoginSession):
     def start(self, server):
         if server not in SERVERS:
             raise ExportError("SERVER_SELECTION_REQUIRED")
+        if self.profile is None:
+            raise ExportError(self.store.profile_error or "LOCAL_PROFILE_REQUIRED")
         if not self.store.qr_slots.acquire(blocking=False):
             raise ExportError("LOCAL_BUSY")
         try:
@@ -351,6 +355,7 @@ class LocalSession(LoginSession):
 class LocalStore:
     def __init__(self, config, profile=None, builder=None, importer=None):
         self.config, self.profile, self.builder = (config, profile, builder)
+        self.profile_error = "" if profile is not None else "LOCAL_PROFILE_REQUIRED"
         self.importer = importer
         self.lock = threading.Lock()
         self.sessions = {}

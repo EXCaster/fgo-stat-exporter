@@ -15,7 +15,7 @@ local.properties
 *.jks
 *.keystore
 *.apk
-# 扫码协议配置不提交到仓库，也不打入桌面程序。
+# 扫码协议配置不提交到仓库；客户端仅内置审核过的应用级固定参数。
 game-protocol.json
 protocol.json
 *.exe

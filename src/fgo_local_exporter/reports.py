@@ -42,6 +42,7 @@ class ReportDocument:
     assets: dict[str, bytes] = field(repr=False)
     data: dict = field(repr=False)
     revision: str
+    image_warning: str = ""
 
     @property
     def byte_size(self):
@@ -115,7 +116,7 @@ class ReportBuilder:
 
         async def prepare():
             async with asyncio.timeout(15), PublicImageDownloader(timeout=12) as source:
-                await fetch_report_assets((spec,), self.config.asset_dir, source)
+                await fetch_report_assets((spec,), self.config.asset_dir, source, repair_cache=True)
 
         try:
             asyncio.run(prepare())
@@ -159,9 +160,13 @@ class ReportBuilder:
             specs = plan_report_assets(
                 report, self.config.data_dir, native_support=options["support"]
             )
-            asyncio.run(_prepare_images(specs, self.config.asset_dir, cancelled, checkpoint))
+            image_counts = asyncio.run(
+                _prepare_images(specs, self.config.asset_dir, cancelled, checkpoint)
+            )
             support_html, native_assets = None, {}
-            if options["support"] and self.config.native_ui_dir is not None:
+            native_ready = _native_images_ready(report, self.config.asset_dir)
+            missing_images = bool(image_counts["missing"] or not native_ready)
+            if options["support"] and self.config.native_ui_dir is not None and native_ready:
                 from fgo_stat_core.infrastructure.native_support_render import render_native_blocks
 
                 support_html, native_assets = render_native_blocks(
@@ -214,6 +219,8 @@ class ReportBuilder:
             source = source.replace(
                 'src="' + self.config.asset_dir.resolve().as_uri() + "/", 'src="assets/'
             )
+            source, placeholders = _missing_image_tags(source, self.config.asset_dir)
+            missing_images |= bool(placeholders)
             assets = {}
             for name in set(re.findall(r'(?:src|href)="assets/([a-z0-9-]+\.png)"', source)):
                 path = self.config.asset_dir / name
@@ -237,7 +244,13 @@ class ReportBuilder:
                 raise ExportError("REPORT_RESOURCE_LIMIT")
             if cancelled.is_set():
                 raise ExportError("CANCELLED")
-            return ReportDocument(source, assets, data, self._revision)
+            return ReportDocument(
+                source,
+                assets,
+                data,
+                self._revision,
+                "REPORT_IMAGES_PARTIAL" if missing_images else "",
+            )
         except ExportError:
             raise
         except Exception as error:
@@ -260,7 +273,9 @@ async def _prepare_images(specs, cache, cancelled, progress, *, timeout=60):
     from fgo_stat_core.infrastructure.public_download import PublicImageDownloader
     from fgo_stat_core.infrastructure.report_assets import fetch_report_assets
 
-    present = sum((cache / spec.filename).is_file() for spec in specs)
+    if len(specs) > 256:
+        raise ExportError("REPORT_ASSET_LIMIT")
+    present = sum(_cached_image(spec, cache) for spec in specs)
     completed = present
     progress("images", completed, len(specs))
     source = PublicImageDownloader(timeout=15)
@@ -271,7 +286,7 @@ async def _prepare_images(specs, cache, cancelled, progress, *, timeout=60):
             try:
                 return await source.fetch(url)
             finally:
-                completed += 1
+                completed = min(completed + 1, len(specs))
                 progress("images", completed, len(specs))
 
     async def cancellation():
@@ -280,7 +295,7 @@ async def _prepare_images(specs, cache, cancelled, progress, *, timeout=60):
 
     async def prepare():
         async with source:
-            return await fetch_report_assets(specs, cache, Downloader())
+            return await fetch_report_assets(specs, cache, Downloader(), repair_cache=True)
 
     downloads = asyncio.create_task(prepare())
     cancellation_task = asyncio.create_task(cancellation())
@@ -290,11 +305,86 @@ async def _prepare_images(specs, cache, cancelled, progress, *, timeout=60):
         )
         if cancelled.is_set():
             raise ExportError("CANCELLED")
-        if downloads not in done:
-            raise ExportError("REPORT_IMAGE_TIMEOUT")
-        return await downloads
+        if downloads in done:
+            return await downloads
     finally:
         for task in (downloads, cancellation_task):
             if not task.done():
                 task.cancel()
         await asyncio.gather(downloads, cancellation_task, return_exceptions=True)
+    # 等待上限只结束图片下载，已知统计仍可生成；后续重试补齐缺图。
+    available = sum(_cached_image(spec, cache) for spec in specs)
+    return {
+        "available": available,
+        "missing": len(specs) - available,
+        "downloaded": max(0, available - present),
+    }
+
+
+def _cached_image(spec, cache):
+    """只核验受控公开缓存；清理不完整记录，避免把残留文件当成已下载。"""
+    from fgo_stat_core.contracts.models import CaptureError
+    from fgo_stat_core.infrastructure.report_assets import _validate_png
+
+    path, stamp = cache / spec.filename, cache / (spec.filename + ".sha256")
+    if cache.is_symlink() or path.is_symlink() or stamp.is_symlink():
+        raise ExportError("REPORT_ASSET_PATH_INVALID")
+    if not path.exists() and not stamp.exists():
+        return False
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024 or stamp.stat().st_size > 256:
+            raise ValueError
+        raw = path.read_bytes()
+        expected = (
+            hashlib.sha256(spec.url.encode()).hexdigest() + ":" + hashlib.sha256(raw).hexdigest()
+        )
+        if stamp.read_text() != expected:
+            raise ValueError
+        _validate_png(raw, spec.transparent)
+        return True
+    except (CaptureError, OSError, UnicodeError, ValueError):
+        path.unlink(missing_ok=True)
+        stamp.unlink(missing_ok=True)
+        return False
+
+
+def _native_images_ready(report, cache):
+    """缺少助战立绘时保留标准文字布局，不让一张公开图阻断整份统计。"""
+    from fgo_stat_core.infrastructure.native_support_adapter import native_panels
+
+    for panel in native_panels(report):
+        for slot in panel.slots:
+            if slot["state"] != "ready":
+                continue
+            if not (cache / f"narrow-{slot['servant_id']}.png").is_file():
+                return False
+            for equipment in slot["equipment"]:
+                if (
+                    equipment["state"] == "ready"
+                    and not (cache / f"equip-{equipment['id']}.png").is_file()
+                ):
+                    return False
+    return True
+
+
+def _missing_image_tags(source, cache):
+    """固定图片引用缺失时显示缺图提示，仍拒绝越界和符号链接。"""
+    missing = 0
+
+    def replace(match):
+        nonlocal missing
+        path = cache / match[1]
+        if path.is_symlink() or path.resolve().parent != cache.resolve():
+            raise ExportError("REPORT_RESOURCE_INVALID")
+        if path.is_file():
+            return match[0]
+        missing += 1
+        classes = re.search(r'\bclass="([A-Za-z0-9 _-]*)"', match[0])
+        style = re.search(r'\bstyle="([^"]*)"', match[0])
+        attributes = ' class="image-missing' + (" " + classes[1] if classes else "") + '"'
+        if style:
+            attributes += ' style="' + style[1] + '"'
+        return "<span" + attributes + ' role="img" aria-label="图片未下载">缺图</span>'
+
+    source = re.sub(r'<img\b[^>]*\bsrc="assets/([a-z0-9-]+\.png)"[^>]*>', replace, source)
+    return source, missing

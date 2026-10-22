@@ -7,10 +7,11 @@ import json
 import re
 import urllib.parse
 import zlib
+from typing import Any
 
 from fgo_local_exporter.errors import ExportError
 
-__all__ = ["TABLE_FIELDS", "decode_response", "export_statistics"]
+__all__ = ["TABLE_FIELDS", "FIELD_ERROR_REASONS", "decode_response", "export_statistics"]
 _CARD = (
     "id svtId lv exp limitCount adjustHp adjustAtk skillLv1 skillLv2 skillLv3 "
     "treasureDeviceLv1 exceedCount hp atk isLock status createdAt dispLimitCount transformVal"
@@ -89,6 +90,51 @@ _SECRET = re.compile(r"usk|token|cookie|password|session|signature|authorization
 _DECODE_LIMIT = 32 * 1024 * 1024
 
 
+def _field_code(table, field):
+    return "STAT_FIELD_" + re.sub(r"[^A-Za-z0-9]+", "_", table + "_" + field).upper()
+
+
+_FIELD_PATHS = {(table, field) for table, fields in TABLE_FIELDS.items() for field in fields}
+_FIELD_PATHS.update((table, "userId") for table in TABLE_FIELDS)
+_FIELD_PATHS.add(("meta", "serverTime"))
+for _table in ("userSvtLeader", "userSvtGrand"):
+    for _slot in (1, 2, 3):
+        _FIELD_PATHS.update(
+            (_table, f"equipTarget{_slot}.{field}")
+            for field in ("svtId", "userSvtId", "lv", "limitCount", "hp", "atk")
+        )
+    _FIELD_PATHS.update(
+        (_table, field)
+        for field in (
+            "appendPassiveSkill",
+            "appendPassiveSkill.skillId",
+            "appendPassiveSkill.skillLv",
+            "script",
+            "script.equipTarget2SkillChange",
+        )
+    )
+FIELD_ERROR_REASONS = {
+    _field_code(table, field): f"统计字段 {table}.{field} 格式不兼容；未记录字段值"
+    for table, field in _FIELD_PATHS
+}
+assert len(FIELD_ERROR_REASONS) == len(_FIELD_PATHS)
+assert all(len(code) <= 64 for code in FIELD_ERROR_REASONS)
+
+
+def _field_failure(table, field):
+    code = _field_code(table, field)
+    return ExportError(code if code in FIELD_ERROR_REASONS else "STATISTICS_FIELD_INVALID")
+
+
+def _checked_field(table, field, value, *, number=False):
+    try:
+        return _number(value) if number else _safe_field(field, value)
+    except ExportError as error:
+        if error.code == "STATISTICS_FIELD_INVALID":
+            raise _field_failure(table, field) from None
+        raise
+
+
 def _pairs(rows):
     result = {}
     for key, value in rows:
@@ -125,8 +171,8 @@ def decode_response(raw: bytes) -> dict:
                     raise ExportError("RESPONSE_INVALID")
                 return root
             if raw.startswith(b"\x1f\x8b"):
-                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
-                    raw = stream.read(_DECODE_LIMIT + 1)
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gzip_stream:
+                    raw = gzip_stream.read(_DECODE_LIMIT + 1)
             elif raw.startswith((b"x\x01", b"x\x9c", b"x\xda")):
                 stream = zlib.decompressobj()
                 raw = stream.decompress(raw, _DECODE_LIMIT + 1)
@@ -181,14 +227,14 @@ def export_statistics(root: dict) -> tuple[bytes, dict]:
         games = replaced["userGame"]
         if not isinstance(games, list) or len(games) != 1:
             raise ExportError("STATISTICS_ACCOUNT_INVALID")
-        account = str(_number(games[0]["userId"]))
+        account = str(_checked_field("userGame", "userId", games[0]["userId"]))
         if str(games[0].get("rkchannel")) == "1000" or "globalUser" in replaced:
             raise ExportError("STATISTICS_REGION_UNSUPPORTED")
         _safe_field("friendCode", games[0]["friendCode"])
-        server_time = _number(cache["serverTime"])
+        server_time = _checked_field("meta", "serverTime", cache["serverTime"], number=True)
         if not 0 < int(server_time) <= 253402300799:
-            raise ExportError("STATISTICS_FIELD_INVALID")
-        safe = {
+            raise _field_failure("meta", "serverTime")
+        safe: dict[str, Any] = {
             "response": [{"nid": "login", "resCode": "00", "success": {}}],
             "cache": {"serverTime": server_time, "replaced": {}, "updated": {}},
         }
@@ -213,13 +259,18 @@ def export_statistics(root: dict) -> tuple[bytes, dict]:
             clean_rows = []
             for row in rows:
                 if not isinstance(row, dict) or (
-                    "userId" in row and str(_number(row["userId"])) != account
+                    "userId" in row
+                    and str(_checked_field(table, "userId", row["userId"], number=True)) != account
                 ):
                     raise ExportError("STATISTICS_ACCOUNT_INVALID")
                 if not set(_REQUIRED.get(table, "").split()).issubset(row):
                     raise ExportError("STATISTICS_REQUIRED_FIELD_MISSING")
+                required = frozenset(_REQUIRED.get(table, "").split())
+                # 可选空字段保留为缺失，不伪造零值；主键和关联字段仍严格校验。
                 clean = {
-                    name: _safe_field(name, value) for name, value in row.items() if name in names
+                    name: _checked_field(table, name, value)
+                    for name, value in row.items()
+                    if name in names and (value is not None or name in required)
                 }
                 if table in {"userSvtLeader", "userSvtGrand"}:
                     # 嵌套字段只保留统计模型所支持的层级。
@@ -227,26 +278,40 @@ def export_statistics(root: dict) -> tuple[bytes, dict]:
                         name = f"equipTarget{slot}"
                         if isinstance(row.get(name), dict):
                             clean[name] = {
-                                key: _number(value)
+                                key: _checked_field(table, name + "." + key, value, number=True)
                                 for key, value in row[name].items()
                                 if key in {"svtId", "userSvtId", "lv", "limitCount", "hp", "atk"}
+                                and value is not None
                             }
-                    if "appendPassiveSkill" in row:
+                    if row.get("appendPassiveSkill") is not None:
                         append = row["appendPassiveSkill"]
                         if not isinstance(append, list) or len(append) > 10:
-                            raise ExportError("STATISTICS_FIELD_INVALID")
+                            raise _field_failure(table, "appendPassiveSkill")
+                        if any(
+                            not isinstance(item, dict) or not {"skillId", "skillLv"}.issubset(item)
+                            for item in append
+                        ):
+                            raise _field_failure(table, "appendPassiveSkill")
                         clean["appendPassiveSkill"] = [
-                            {name: _number(item[name]) for name in ("skillId", "skillLv")}
+                            {
+                                name: _checked_field(
+                                    table, "appendPassiveSkill." + name, item[name], number=True
+                                )
+                                for name in ("skillId", "skillLv")
+                            }
                             for item in append
                         ]
-                    if table == "userSvtGrand" and "script" in row:
+                    if table == "userSvtGrand" and row.get("script") not in (None, []):
                         script = row["script"]
                         if not isinstance(script, dict):
-                            raise ExportError("STATISTICS_FIELD_INVALID")
-                        if "equipTarget2SkillChange" in script:
+                            raise _field_failure(table, "script")
+                        if script.get("equipTarget2SkillChange") is not None:
                             clean["script"] = {
-                                "equipTarget2SkillChange": _number(
-                                    script["equipTarget2SkillChange"]
+                                "equipTarget2SkillChange": _checked_field(
+                                    table,
+                                    "script.equipTarget2SkillChange",
+                                    script["equipTarget2SkillChange"],
+                                    number=True,
                                 )
                             }
                 clean_rows.append(clean)
@@ -254,7 +319,7 @@ def export_statistics(root: dict) -> tuple[bytes, dict]:
             safe["cache"][section][table] = clean_rows
         if not {"userGame", "userSvt", "userSvtCollection"}.issubset(counts):
             raise ExportError("STATISTICS_CORE_TABLES_MISSING")
-        pending = [safe]
+        pending: list[Any] = [safe]
         while pending:
             value = pending.pop()
             if isinstance(value, dict):
@@ -265,7 +330,7 @@ def export_statistics(root: dict) -> tuple[bytes, dict]:
                 pending.extend(value)
         body = json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode()
         return body, {
-            "name": games[0].get("name", "未提供名称"),
+            "name": games[0].get("name") or "未提供名称",
             "level": games[0].get("lv"),
             "captured_at": int(server_time),
             "tables": counts,

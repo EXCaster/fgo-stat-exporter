@@ -22,7 +22,6 @@ class PublicImageDownloader:
         self.limit, self.timeout = limit, timeout
         self._client = None
         self._source = ""
-        self._choice = asyncio.Lock()
 
     async def __aenter__(self):
         self._client = httpx.AsyncClient(
@@ -58,19 +57,7 @@ class PublicImageDownloader:
             raise CaptureError("REPORT_IMAGE_SOURCE_REJECTED")
         try:
             async with asyncio.timeout(self.timeout):
-                if not self._source:
-                    async with self._choice:
-                        if not self._source:
-                            return await self._choose(parsed.path)
-                for host in (self._source, next(h for h in _SOURCES if h != self._source)):
-                    try:
-                        async with asyncio.timeout(self.timeout / 2):
-                            raw = await self._read(host + parsed.path)
-                        self._source = host
-                        return raw
-                    except (CaptureError, httpx.HTTPError, OSError, TimeoutError):
-                        continue
-                raise CaptureError("REPORT_IMAGE_DOWNLOAD_FAILED")
+                return await self._choose(parsed.path)
         except (httpx.HTTPError, OSError, TimeoutError):
             raise CaptureError("REPORT_IMAGE_DOWNLOAD_FAILED") from None
 
@@ -80,10 +67,12 @@ class PublicImageDownloader:
                 await asyncio.sleep(delay)
             return await self._read(host + path)
 
-        # 原站正常时不请求镜像；连接较慢时再启用 Chaldea 官方国内线路。
+        # 每张图独立选择线路，避免某张图或一个站点拖住整批下载。
+        primary = self._source or _SOURCES[0]
+        sources = (primary, next(host for host in _SOURCES if host != primary))
         tasks = {
             asyncio.create_task(read(host, delay)): host
-            for host, delay in zip(_SOURCES, (0, 1), strict=True)
+            for host, delay in zip(sources, (0, 0.6), strict=True)
         }
         pending = set(tasks)
         oversized = False
@@ -142,4 +131,4 @@ class PublicImageDownloader:
                 await response.aclose()
 
 
-_SOURCES = ("https://static.atlasacademy.io", "https://static.atlas.chaldea.center")
+_SOURCES = ("https://static.atlas.chaldea.center", "https://static.atlasacademy.io")

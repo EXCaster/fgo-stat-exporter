@@ -36,6 +36,7 @@ class _SilentHandler(WSGIRequestHandler):
 def create_desktop_app(config, bridge):
     app = create_app(config)
     bridge._store = app.extensions["local_store"]
+    bridge._restore_profile()
 
     @app.get("/desktop.js")
     def javascript():
@@ -55,7 +56,7 @@ def main():
     parser.add_argument("--resources", type=Path)
     parser.add_argument("--data-dir", type=Path, help="指定字典、图片缓存和浏览器数据目录")
     parser.add_argument(
-        "--protocol", type=Path, help="指定固定协议配置，默认读取 game-protocol.json"
+        "--protocol", type=Path, help="覆盖内置的应用级扫码配置；源码默认读取 game-protocol.json"
     )
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)
@@ -97,7 +98,6 @@ def main():
         bridge._asset_root = bundled
     if resources is not None:
         bridge._initialize_resources()
-    bridge._restore_profile()
     window = webview.create_window(
         f"FGO 抓包统计 {__version__}",
         config.origin,

@@ -12,6 +12,7 @@ __all__ = [
     "GameProfile",
     "checked_profile",
     "default_profile_path",
+    "load_desktop_profile",
     "load_profile",
     "profile_values",
 ]
@@ -85,6 +86,20 @@ def load_profile(path):
         return checked_profile(json.loads(raw))
     except (OSError, ValueError, TypeError):
         raise ExportError("LOCAL_PROFILE_INVALID") from None
+
+
+def load_desktop_profile(path=None):
+    """显式配置优先；独立 EXE 默认使用经审核的内置应用参数。"""
+    if path is not None:
+        profile = load_profile(path)
+        if profile is None:
+            raise ExportError("LOCAL_PROFILE_REQUIRED")
+        return profile
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        profile = load_profile(Path(sys._MEIPASS) / "runtime-config/game-protocol.json")
+        if profile is not None:
+            return profile
+    return load_profile(default_profile_path())
 
 
 def profile_values(profile):

@@ -305,6 +305,59 @@ def test_bundled_dictionary_is_cached_in_selected_directory_without_network(reso
     assert upstream.requests == []
 
 
+def test_new_bundle_replaces_old_active_dictionary_without_network(resources, tmp_path):
+    source, upstream = resources
+    old_bundle = source.current
+    chosen = ResourceManager(tmp_path / "upgrade/resources")
+    old_active = chosen.cache_existing(old_bundle)
+    upstream.add_new_content()
+    assert checked(source)
+    new_bundle = source.current
+
+    class Offline:
+        def get(self, *_args, **_kwargs):
+            pytest.fail("启用新版内置字典不应等待网络")
+
+    chosen.client = Offline()
+    fresh = chosen.restore_for_startup(new_bundle)
+    assert fresh != old_active and fresh.parent == chosen.root
+    master = load_report_master(fresh / "data", fresh / "atlas-cn")
+    assert master.servants[NEW_SERVANT].released
+    assert NEW_CE in master.craft_essences and 990007 in master.gachas
+    assert chosen.restore_for_startup(old_bundle) == fresh
+
+
+def test_dictionary_update_keeps_reviewed_images_and_existing_downloads(resources, tmp_path):
+    source, upstream = resources
+    bundle = source.current
+    image = b"artificial-reviewed-resource"
+    (bundle / "assets").mkdir()
+    (bundle / "assets/hero-990001.png").write_bytes(image)
+    (bundle / "SEED_IMAGES_MANIFEST.json").write_bytes(
+        encoded({"hero-990001.png": hashlib.sha256(image).hexdigest()})
+    )
+    chosen = ResourceManager(tmp_path / "phone/resources")
+    cache = chosen.image_cache(bundle, bundle)
+    (cache / "narrow-990002.png").write_bytes(b"artificial-previous-download")
+    upstream.add_new_content()
+    assert checked(source)
+    updated = chosen.image_cache(bundle, source.current)
+    assert updated == cache
+    assert (updated / "hero-990001.png").read_bytes() == image
+    assert (updated / "narrow-990002.png").read_bytes() == b"artificial-previous-download"
+
+
+def test_mobile_startup_uses_new_bundle_when_cached_dictionary_is_old(resources, tmp_path):
+    source, upstream = resources
+    chosen = ResourceManager(tmp_path / "phone/resources")
+    chosen.cache_existing(source.current)
+    upstream.add_new_content()
+    assert checked(source)
+    fresh = chosen.restore_for_startup(source.current, cache_bundle=False)
+    assert fresh == source.current
+    assert load_report_master(fresh / "data", fresh / "atlas-cn").servants[NEW_SERVANT].released
+
+
 @pytest.mark.parametrize("failure", ["network", "hash", "format", "race", "cancel"])
 def test_failed_update_preserves_active_files_pointer_and_builder(resources, failure):
     manager, upstream = resources

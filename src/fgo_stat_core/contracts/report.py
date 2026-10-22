@@ -171,6 +171,7 @@ class CollectionSummary(_SafeModel):
 
 class SummonEstimate(_SafeModel):
     adjusted_ssr_acquisitions: Count
+    # 保留字段名以兼容既有报告；此抽数仅排除友情点，包含福袋。
     adjusted_pulls: Annotated[int, Field(gt=0)]
     lucky_bag_records: Count
     unmapped_gacha_records: Count

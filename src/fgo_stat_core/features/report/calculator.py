@@ -144,7 +144,7 @@ class _Report:
             if value is None
             else issues,
             source_tables=sources,
-            rule_id="chaldea24." + rule,
+            rule_id="cn-summon.v2" if rule == "summon" else "chaldea24." + rule,
         )
 
     def has_unknown_cards(self) -> bool:
@@ -383,7 +383,8 @@ class _Report:
                     return self.metric(None, sources, "summon", needs_master=True)
                 if not svt.obtains.intersection({"eventReward", "clearReward", "unavailable"}):
                     count += _int(row, "totalGetNum")
-            pulls = sum(_int(r, "num") for r in rows) - bags
+            # 总抽数保留福袋，只有五星次数扣除福袋保底。
+            pulls = sum(_int(r, "num") for r in rows)
             count -= bags
             if count < 0 or pulls <= 0:
                 return self.metric(None, sources, "summon", ("PARTIAL_SOURCE",))
