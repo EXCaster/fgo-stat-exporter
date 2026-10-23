@@ -26,6 +26,7 @@ _BUSY = {
     "filtering_statistics",
 }
 _DATA_TTL = 600
+_QR_SWITCHABLE = {"generating", "waiting_scan", "waiting_confirm"}
 
 
 class _Budget:
@@ -150,6 +151,7 @@ class LocalSession(LoginSession):
                     "app_version": __version__,
                     "source": self.source,
                     "can_import": self.phase not in _BUSY,
+                    "can_switch_server": self.source == "qr" and self.phase in _QR_SWITCHABLE,
                     "qr_available": self.profile is not None,
                     "qr_error": "" if self.profile is not None else self.store.profile_error,
                     "report_available": self.store.builder is not None,
@@ -195,6 +197,19 @@ class LocalSession(LoginSession):
                         self.phase, self.error = ("error", "LOCAL_BUSY")
         finally:
             self.store.qr_slots.release()
+
+    def select_server(self, server, generation):
+        """切换区服只取消旧二维码，新二维码由用户手动申请。"""
+        if server not in SERVERS:
+            raise ExportError("SERVER_SELECTION_REQUIRED")
+        if type(generation) is not int or generation < 0:
+            raise ExportError("REQUEST_INVALID")
+        with self.lock:
+            if generation != self.generation or not self.state()["can_switch_server"]:
+                raise ExportError("OPERATION_NOT_READY")
+            if server != self.server:
+                self.clear()
+                self.server = server
 
     def import_file(self, raw, server):
         if server not in SERVERS:

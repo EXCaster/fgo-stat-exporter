@@ -113,7 +113,7 @@ class LoginSession:
                 if cancelled():
                     raise ExportError("CANCELLED")
                 self.phase = phase
-                if phase.startswith("game_") or phase == "fetching_statistics":
+                if phase.startswith("game_") or phase in {"fetching_statistics", "expired"}:
                     self.svg = b""
 
         try:
@@ -128,14 +128,18 @@ class LoginSession:
                 self.svg = buffer.getvalue()
                 self.phase = "waiting_scan"
                 self.expires = time.monotonic() + 180
-            value = qr = buffer = None
+            del value, qr, buffer
             while not cancelled() and time.monotonic() < self.expires:
                 phase, user = client.poll(ticket)
                 if cancelled():
                     return
                 if phase == "authorized":
                     with self.lock:
+                        if cancelled():
+                            return
                         self.auth = user
+                        self.phase = "game_handoff"
+                        self.svg = b""
                     body, preview = client.statistics(user, progress, cancelled)
                     with self.lock:
                         if cancelled():
@@ -152,14 +156,10 @@ class LoginSession:
                     return
                 progress(phase)
                 if phase == "expired":
-                    with self.lock:
-                        self.svg = b""
                     return
                 cancel.wait(2)
             if not cancelled():
                 progress("expired")
-                with self.lock:
-                    self.svg = b""
         except Exception as error:
             with self.lock:
                 if not cancelled():

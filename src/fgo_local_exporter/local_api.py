@@ -171,6 +171,11 @@ def create_app(
         raw = request.get_data(cache=False)
         return operation(lambda: g.visitor.import_file(raw, request.headers.get("X-FGO-Server")))
 
+    @app.post("/api/server")
+    def select_server():
+        value = json_body({"server", "generation"})
+        return operation(lambda: g.visitor.select_server(value["server"], value["generation"]))
+
     @app.post("/api/clear")
     def clear():
         json_body(set())
@@ -187,7 +192,10 @@ def create_app(
     @app.get("/api/qr.svg")
     def qr():
         with g.visitor.lock:
-            if not g.visitor.svg:
+            if (
+                request.args.get("generation") != str(g.visitor.generation)
+                or not g.visitor.svg
+            ):
                 return reply({"error": "QR_NOT_READY"}, 404)
             return Response(g.visitor.svg, content_type="image/svg+xml")
 

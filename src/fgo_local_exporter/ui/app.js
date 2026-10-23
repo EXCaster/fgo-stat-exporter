@@ -7,6 +7,7 @@
     LOCAL_BUSY: "当前任务较多，请稍后再试。",
     VISITOR_EXPIRED: "浏览器会话已过期，请刷新页面重新开始。",
     CONSENT_REQUIRED: "请先阅读并勾选数据处理说明。",
+    OPERATION_NOT_READY: "当前状态不允许此操作，请稍候或清除本次数据后重试。",
     LOCAL_PROFILE_REQUIRED: "扫码配置缺失，请使用包含扫码配置的新版 Windows 程序；也可切换到“导入文件”。",
     LOCAL_PROFILE_INVALID: "扫码配置未通过校验，请更新程序；使用自定义配置时请检查配置文件。仍可切换到“导入文件”。",
     SERVER_SELECTION_REQUIRED: "请先选择角色所在的 iOS 或安卓服务器。",
@@ -35,6 +36,7 @@
   let mode = "qr", selectedFile = null, current = null, pending = false, qrGeneration = -1;
   let shownReport = "", imageBusy = false, blobUrls = [], frameHeight = 0;
   let countdownEndsAt = 0;
+  let sessionEpoch = 0;
   const describe = code => errors[code] || (/^STAT_FIELD_[A-Z0-9_]+$/.test(code) || code === "STATISTICS_FIELD_INVALID"
     ? "统计字段格式暂不兼容，请提供下方完整错误码以便定位。"
     : "本次操作未完成，请核对文件或重新尝试。排查时只需提供错误码。");
@@ -70,18 +72,35 @@
   }
   function controls() {
     const working = pending || (current && busy.has(current.phase));
-    document.querySelectorAll('input[name="server"]').forEach(input => { input.disabled = !!working; });
+    const switchable = mode === "qr" && current?.can_switch_server && $("consent").checked;
+    document.querySelectorAll('input[name="server"]').forEach(input => { input.disabled = pending || (!!working && !switchable); });
     const ready = !!server() && $("consent").checked && (mode === "qr" || selectedFile);
     const qrUnavailable = mode === "qr" && current?.qr_available === false;
     $("start-button").disabled = !!working || !ready || qrUnavailable;
     $("start-label").textContent = pending ? "正在提交…" : working ? "正在处理…" : mode === "qr" ? (current?.phase === "expired" ? "重新生成二维码" : "生成二维码") : "读取统计文件";
-    $("field-hint").textContent = working ? "处理期间请保持此页面打开" : !server() ? "请先选择角色所在区服" : qrUnavailable ? describe(current.qr_error || "LOCAL_PROFILE_REQUIRED") : !$("consent").checked ? "请阅读并勾选数据处理说明" : mode === "file" && !selectedFile ? "请选择需要导入的文件" : "数据在本机内存中短时处理，完成后请及时保存";
+    $("field-hint").textContent = switchable && !pending ? "区服选错可直接切换，切换后请手动点击“生成二维码”。" : working ? "处理期间请保持此页面打开" : !server() ? "请先选择角色所在区服" : qrUnavailable ? describe(current.qr_error || "LOCAL_PROFILE_REQUIRED") : !$("consent").checked ? "请阅读并勾选数据处理说明" : mode === "file" && !selectedFile ? "请选择需要导入的文件" : "数据在本机内存中短时处理，完成后请及时保存";
     const reportWorking = ["queued", "building"].includes(current?.report_phase);
     $("build-report").disabled = pending || reportWorking || !current?.download_ready || !current?.report_available;
     $("build-report").textContent = reportWorking ? "正在生成统计图…" : current?.report_phase === "ready" ? "重新生成统计图 ↗" : "生成统计图 ↗";
     $("report-note").textContent = reportWorking ? (current.report_phase === "queued" ? "正在排队，请稍候…" : reportProgress(current.report_progress)) : current?.download_ready ? "图片在你的浏览器中合成。" : "请先扫码获取或导入数据。";
     $("download-image").disabled = imageBusy || !shownReport;
     $("download-sections").disabled = imageBusy || !shownReport;
+  }
+  async function changeServer() {
+    const selected = server();
+    if (pending || mode !== "qr" || !current?.can_switch_server || selected === current.server) { controls(); return; }
+    if (!$("consent").checked) { showError("CONSENT_REQUIRED"); controls(); return; }
+    pending = true; sessionEpoch++; controls();
+    $("error-box").hidden = true;
+    qrGeneration = -1; $("qr-image").hidden = true; $("qr-image").removeAttribute("src");
+    $("qr-badge").hidden = true; $("qr-empty").hidden = false;
+    $("qr-empty").querySelector("b").textContent = "正在切换区服…";
+    try {
+      render(await post("/api/server", {server:selected, generation:current.generation}));
+    } catch (error) {
+      try { render(await api("/api/state")); } catch (_refreshError) {}
+      showError(error.code);
+    } finally { pending = false; controls(); }
   }
   function setMode(value) {
     mode = value;
@@ -111,9 +130,13 @@
     discardImages();
   }
   function render(value) {
+    if (current && value.generation < current.generation) return;
     current = value;
+    if (value.source === "qr" && busy.has(value.phase) && value.server) {
+      document.querySelectorAll('input[name="server"]').forEach(input => { input.checked = input.value === value.server; });
+    }
     countdownEndsAt = performance.now() + Math.max(0, value.remaining_seconds || 0) * 1000;
-    $("status-message").textContent = ["ready", "cleared"].includes(value.phase) ? (value.phase === "cleared" ? "本次记录已清除，可以重新扫码或导入文件。" : "选择扫码登录，或导入已有文件。") : value.message;
+    $("status-message").textContent = ["ready", "cleared"].includes(value.phase) ? (value.phase === "cleared" ? (value.server ? "原二维码已取消，请确认区服后点击“生成二维码”。" : "本次记录已清除，可以重新扫码或导入文件。") : "选择扫码登录，或导入已有文件。") : value.message;
     $("status-line").className = "status-line" + (busy.has(value.phase) ? " busy" : value.phase === "complete" ? " complete" : value.phase === "error" ? " error" : "");
     $("live-tag").textContent = value.phase === "complete" ? "数据就绪" : busy.has(value.phase) ? "正在读取" : value.phase === "expired" ? "已过期" : "等待数据";
     $("live-tag").className = "live-tag" + (value.phase === "complete" ? " complete" : "");
@@ -126,7 +149,8 @@
     } else {
       $("qr-image").hidden = true; $("qr-image").removeAttribute("src");
       $("qr-empty").hidden = false; $("qr-badge").hidden = true; qrGeneration = -1;
-      $("qr-empty").querySelector("b").textContent = value.phase === "expired" ? "二维码已过期" : "你的二维码会显示在这里";
+      $("qr-empty").querySelector("b").textContent = value.phase === "expired" ? "二维码已过期" : value.phase === "cleared" && value.server ? "原二维码已取消" : "你的二维码会显示在这里";
+      $("qr-empty").querySelector("p").textContent = value.phase === "cleared" && value.server ? "请点击下方“生成二维码”" : "选择区服，阅读下方说明后生成";
     }
     const complete = value.phase === "complete" && value.download_ready && value.preview;
     $("empty-result").hidden = !!complete;
@@ -160,8 +184,9 @@
     window.dispatchEvent(new CustomEvent("fgo-state", {detail:{ready:!!complete, generation:value.generation, engine:value.engine_revision || ""}}));
   }
   async function poll() {
-    try { render(await api("/api/state")); }
-    catch (error) { showError(error.code); }
+    const epoch = sessionEpoch;
+    try { const value = await api("/api/state"); if (epoch === sessionEpoch && !pending) render(value); }
+    catch (error) { if (epoch === sessionEpoch && !pending) showError(error.code); }
     finally { window.setTimeout(poll, 2000); }
   }
   function chooseFile(file) {
@@ -174,7 +199,7 @@
   }
   async function start() {
     if (pending || !server() || !$("consent").checked) return;
-    pending = true; controls(); $("error-box").hidden = true;
+    pending = true; sessionEpoch++; controls(); $("error-box").hidden = true;
     try {
       if (mode === "qr") {
         render(await post("/api/start", {server:server(), consent:true}));
@@ -296,7 +321,7 @@
   $("tab-qr").addEventListener("click", () => setMode("qr"));
   $("tab-file").addEventListener("click", () => setMode("file"));
   $("consent").addEventListener("change", controls);
-  document.querySelectorAll('input[name="server"]').forEach(input => input.addEventListener("change", controls));
+  document.querySelectorAll('input[name="server"]').forEach(input => input.addEventListener("change", changeServer));
   $("capture-file").addEventListener("change", event => chooseFile(event.target.files[0]));
   $("file-drop").addEventListener("dragover", event => { event.preventDefault(); $("file-drop").classList.add("drag-over"); });
   $("file-drop").addEventListener("dragleave", () => $("file-drop").classList.remove("drag-over"));
@@ -304,8 +329,11 @@
   $("start-button").addEventListener("click", start);
   $("build-report").addEventListener("click", build);
   $("clear-session").addEventListener("click", async () => {
+    if (pending) return;
+    pending = true; sessionEpoch++; controls();
     try { render(await post("/api/clear", {})); selectedFile = null; $("capture-file").value = ""; controls(); }
     catch (error) { showError(error.code); }
+    finally { pending = false; controls(); }
   });
   $("report-frame").addEventListener("load", async () => {
     if (!shownReport) return;
