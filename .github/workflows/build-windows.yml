@@ -12,6 +12,50 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Create game protocol config
+        shell: pwsh
+        env:
+          FGO_SDK_KEY: ${{ secrets.FGO_SDK_KEY }}
+          FGO_DEVELOPMENT_CODE: ${{ secrets.FGO_DEVELOPMENT_CODE }}
+          FGO_SESSION_PREFIX: ${{ secrets.FGO_SESSION_PREFIX }}
+        run: |
+          $sdkKey = $env:FGO_SDK_KEY
+          $developmentCode = $env:FGO_DEVELOPMENT_CODE
+          $sessionPrefix = $env:FGO_SESSION_PREFIX
+
+          if (
+            [string]::IsNullOrWhiteSpace($sdkKey) -or
+            [string]::IsNullOrWhiteSpace($developmentCode) -or
+            [string]::IsNullOrWhiteSpace($sessionPrefix) -or
+            $sdkKey -eq "REPLACE_ME_NOT_REAL" -or
+            $developmentCode -eq "REPLACE_ME_NOT_REAL" -or
+            $sessionPrefix -eq "REPLACE_ME_NOT_REAL"
+          ) {
+            throw "请先在 Repository secrets 中填写真实配置值。"
+          }
+
+          if (-not (Test-Path "game-protocol.example.json")) {
+            throw "找不到 game-protocol.example.json，请检查仓库文件路径。"
+          }
+
+          $config = Get-Content "game-protocol.example.json" -Raw |
+            ConvertFrom-Json
+
+          $config.sdk_key = $sdkKey
+          $config.development_code = $developmentCode
+          $config.session_prefix = $sessionPrefix
+
+          $json = $config | ConvertTo-Json -Depth 20
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+          [System.IO.File]::WriteAllText(
+            "game-protocol.json",
+            $json,
+            $utf8NoBom
+          )
+
+          Write-Host "游戏协议配置文件已生成。"
+
       - name: Install Python 3.13
         uses: actions/setup-python@v5
         with:
