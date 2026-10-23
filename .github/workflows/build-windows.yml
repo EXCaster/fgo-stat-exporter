@@ -68,6 +68,8 @@ jobs:
         run: uv sync --extra desktop --group build --group dev
 
       - name: Build EXE
+        env:
+          PYTHONIOENCODING: utf-8
         run: uv run python tools/build_desktop.py --output build/desktop
 
       - name: Upload EXE
